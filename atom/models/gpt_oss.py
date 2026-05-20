@@ -290,6 +290,7 @@ class TransformerBlock(torch.nn.Module):
             config.hidden_size,
             eps=1e-5,
             fused_allreduce=ENABLE_ALLREDUCE_RMSNORM_FUSION and layer_num > 0,
+            use_triton=True,
         )
         # Fuse o_proj AllReduce into post_attention_layernorm.
         # Padding for MXFP4 MoE GEMM alignment is now handled inside MLPBlock,
@@ -299,6 +300,7 @@ class TransformerBlock(torch.nn.Module):
             eps=1e-5,
             fused_allreduce=ENABLE_ALLREDUCE_RMSNORM_FUSION and self.tp_size > 1,
             x_pad_to_multiple=0 if self.tp_size > 1 else 256,
+            use_triton=True,
         )
 
     def forward(
@@ -353,6 +355,7 @@ class GptOssModel(nn.Module):
             self.config.hidden_size,
             eps=1e-5,
             fused_allreduce=ENABLE_ALLREDUCE_RMSNORM_FUSION,
+            use_triton=True,
         )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], self.config.hidden_size

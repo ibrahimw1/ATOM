@@ -72,6 +72,59 @@ def rmsnorm2d_fwd_with_add_(
     return out.view(ori_shape), residual_out.view(ori_shape)
 
 
+# Triton dispatch for the unquantized BF16/FP16 RMSNorm path. aiter.ops.triton
+# only provides a tuned kernel up to hidden_size=8192; ATOM falls back to the
+# HIP path above for anything wider. Opt-in via RMSNorm(use_triton=True).
+_TRITON_BF16_RMSNORM_MAX_DIM = 8192
+
+
+def _triton_rmsnorm2d_fwd_fake(
+    x: torch.Tensor, weight: torch.Tensor, eps: float, dim: int
+) -> torch.Tensor:
+    return torch.empty_like(x)
+
+
+def _triton_rmsnorm2d_fwd_with_add_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    residual: torch.Tensor,
+    eps: float,
+    dim: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty_like(x), torch.empty_like(x)
+
+
+@torch_compile_guard(gen_fake=_triton_rmsnorm2d_fwd_fake, mutates_args=[])
+def _triton_rmsnorm2d_fwd_(
+    x: torch.Tensor, weight: torch.Tensor, eps: float, dim: int
+) -> torch.Tensor:
+    from aiter.ops.triton.normalization.rmsnorm import rms_norm as _triton_rms_norm
+
+    ori_shape = x.shape
+    x = x.reshape(-1, dim)
+    return _triton_rms_norm(x, weight, eps).view(ori_shape)
+
+
+@torch_compile_guard(gen_fake=_triton_rmsnorm2d_fwd_with_add_fake, mutates_args=[])
+def _triton_rmsnorm2d_fwd_with_add_(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    residual: torch.Tensor,
+    eps: float,
+    dim: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    from aiter.ops.triton.normalization.rmsnorm import (
+        rmsnorm2d_fwd_with_add as _triton_rmsnorm_with_add,
+    )
+
+    ori_shape = x.shape
+    x = x.reshape(-1, dim)
+    out = torch.empty_like(x)
+    residual_out = torch.empty_like(x)
+    _triton_rmsnorm_with_add(out, x, residual, residual_out, weight, eps)
+    return out.view(ori_shape), residual_out.view(ori_shape)
+
+
 def fused_rmsnorm_pad_fake_tensors(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -218,6 +271,7 @@ class RMSNorm(nn.Module):
         fused_quant: bool = False,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        use_triton: bool = False,
     ) -> None:
         super().__init__()
         self.dim = dim
@@ -226,6 +280,7 @@ class RMSNorm(nn.Module):
         self.x_pad_to_multiple = x_pad_to_multiple
         self.fused_allreduce = fused_allreduce
         self.use_fused_quant = fused_quant
+        self.use_triton_bf16 = use_triton and dim <= _TRITON_BF16_RMSNORM_MAX_DIM
         self.tp_size = get_tensor_model_parallel_world_size()
 
         layer_quant_config = (
@@ -333,14 +388,20 @@ class RMSNorm(nn.Module):
                 return (x, x_scale), residual_out
             else:
                 if residual is None:
-                    # return rmsnorm2d_fwd(x, self.weight, self.eps).view(ori_shape)
-                    x = rmsnorm2d_fwd_(x, self.weight, self.eps, self.dim)
+                    if self.use_triton_bf16:
+                        x = _triton_rmsnorm2d_fwd_(x, self.weight, self.eps, self.dim)
+                    else:
+                        x = rmsnorm2d_fwd_(x, self.weight, self.eps, self.dim)
                     return x
                 else:
-                    # return self.add_rms_forward(x, residual)
-                    x, residual = rmsnorm2d_fwd_with_add_(
-                        x, self.weight, residual, self.eps, self.dim
-                    )
+                    if self.use_triton_bf16:
+                        x, residual = _triton_rmsnorm2d_fwd_with_add_(
+                            x, self.weight, residual, self.eps, self.dim
+                        )
+                    else:
+                        x, residual = rmsnorm2d_fwd_with_add_(
+                            x, self.weight, residual, self.eps, self.dim
+                        )
                     return x, residual
 
 
