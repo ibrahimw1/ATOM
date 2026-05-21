@@ -42,6 +42,27 @@ def use_triton_gemm() -> bool:
     return envs.ATOM_USE_TRITON_GEMM
 
 
+# Plain Triton BF16 dense GEMM helper for the LinearBase QuantType.No branch.
+# Kept out of @torch_compile_guard for the same reason as
+# layernorm._triton_rmsnorm2d_fwd_plain: adding new compile-guarded ops to
+# the registry mid-flight perturbs inductor in ways that break gfx950 MoE
+# warmup. Plain function; deferred aiter import.
+def _triton_bf16_linear_plain(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    otype: torch.dtype,
+) -> torch.Tensor:
+    from aiter.ops.triton.gemm.basic.gemm_a16w16 import gemm_a16w16
+
+    out_dtype = otype if otype is not None else x.dtype
+    if x.dim() == 2:
+        return gemm_a16w16(x, weight, bias=bias, dtype=out_dtype)
+    flat = x.reshape(-1, x.shape[-1])
+    out = gemm_a16w16(flat, weight, bias=bias, dtype=out_dtype)
+    return out.view(*x.shape[:-1], weight.shape[0])
+
+
 if use_triton_gemm():
     try:
         # from aiter.ops.triton.gemm_a8w8_blockscale import gemm_a8w8_blockscale_preshuffle as gemm_a8w8_blockscale_bpreshuffle_triton
@@ -215,8 +236,10 @@ class LinearBase(nn.Module):
         reduce_results: bool = False,
         source_quant_dtype: torch.dtype | None = None,
         prefix: str = "",
+        use_triton_bf16: bool = False,
     ):
         self.prefix = prefix
+        self.use_triton_bf16 = bool(use_triton_bf16)
         layer_quant_config = (
             quant_config.get_layer_quant_config(prefix)
             if quant_config is not None
@@ -526,12 +549,20 @@ class LinearBase(nn.Module):
         self, x: torch.Tensor, x_scale: Optional[torch.Tensor] = None, otype=dtypes.bf16
     ) -> torch.Tensor:
         if self.quant_type.value == QuantType.No.value:
-            y = tgemm.mm(
-                x,
-                self.weight,
-                self.bias,
-                otype=otype,
-            )
+            if (
+                self.use_triton_bf16
+                and x.dtype in (torch.bfloat16, torch.float16)
+                and self.weight.dim() == 2
+                and not getattr(self.weight, "is_shuffled", False)
+            ):
+                y = _triton_bf16_linear_plain(x, self.weight, self.bias, otype)
+            else:
+                y = tgemm.mm(
+                    x,
+                    self.weight,
+                    self.bias,
+                    otype=otype,
+                )
         else:
             if x_scale is None:
                 quant_func = self.quant_func

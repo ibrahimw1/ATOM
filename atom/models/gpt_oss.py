@@ -108,6 +108,11 @@ class OAIAttention(nn.Module):
             prefix=f"{prefix}.qkv_proj",
             bias=True,
         )
+        # Stage 4: route BF16 dense GEMM through aiter Triton gemm_a16w16
+        # for gpt-oss linears (replaces aiter::bf16gemm_fp32bf16_tn_* tiles,
+        # ~975k µs in baseline). Per-instance flag; default is False so other
+        # models are unaffected.
+        self.qkv_proj.use_triton_bf16 = True
 
         self.o_proj = RowParallelLinear(
             input_size=self.num_attention_heads * self.head_dim,
@@ -117,6 +122,7 @@ class OAIAttention(nn.Module):
             bias=True,
             reduce_results=not ENABLE_ALLREDUCE_RMSNORM_FUSION,
         )
+        self.o_proj.use_triton_bf16 = True
 
         self.num_local_attention_heads = config.num_attention_heads // tp_size
         self.num_local_key_value_heads = config.num_key_value_heads // tp_size
@@ -209,6 +215,7 @@ class MLPBlock(torch.nn.Module):
             quant_config=None,
             prefix=f"{prefix}.gate",
         )
+        self.router.use_triton_bf16 = True
         assert config.intermediate_size % self.world_size == 0
         # Stage 3: route gpt-oss MoE through aiter Triton (replaces
         # ck_tile::MoeFlatmmKernel — 884k µs in the baseline trace).
