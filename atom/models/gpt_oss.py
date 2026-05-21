@@ -56,6 +56,14 @@ from transformers import GptOssConfig
 
 ENABLE_ALLREDUCE_RMSNORM_FUSION = envs.ATOM_ENABLE_ALLREDUCE_RMSNORM_FUSION
 
+# Stage 8: try aiter Triton MHA prefill (replaces ck_tile::FmhaFwdKernel,
+# ~241 µs in baseline). Kevin's note in profile_gptoss_triton_flags.sh
+# warned this rejects window_size_right != -1 on SWA layers — gpt-oss
+# uses SWA on alternating layers. Setting at import time; if it crashes
+# we revert.
+import os as _os_s8
+_os_s8.environ.setdefault("FLASH_ATTENTION_TRITON_AMD_ENABLE", "TRUE")
+
 # Stage 6 attempt (reverted): force aiter pa_decode_gluon to use its FlyDSL
 # Triton reduce kernel instead of the C++ HIP one (which shows up as
 # aiter::pa_decode_ps_reduce_hip_kernel, ~1,972 µs). The path exists at
