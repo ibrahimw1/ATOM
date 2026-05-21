@@ -474,6 +474,7 @@ class GptOssForCausalLM(nn.Module):
             self.config.vocab_size,
             self.config.hidden_size,
             prefix=maybe_prefix(prefix, "lm_head"),
+            use_triton_bf16=True,
         )
         # self.logits_processor = LogitsProcessor(self.config.vocab_size)
         self.make_empty_intermediate_tensors = (

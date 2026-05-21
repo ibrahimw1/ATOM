@@ -158,9 +158,15 @@ class ParallelLMHead(VocabParallelEmbedding):
         num_embeddings: int,
         embedding_dim: int,
         bias: bool = False,
+        use_triton_bf16: bool = False,
         **kwargs,
     ):
         super().__init__(num_embeddings, embedding_dim)
+        # Stage 7: route the BF16 logit projection through the same Triton
+        # gemm_a16w16 helper LinearBase uses. ParallelLMHead doesn't inherit
+        # from LinearBase, so Stage 4's flag doesn't reach it — this is the
+        # ~7,030 µs rocBLAS Cijk_Alik_Bljk_BBS_BH_Bias kernel in the trace.
+        self.use_triton_bf16 = bool(use_triton_bf16)
         if bias:
             self.bias = atom_parameter(
                 torch.empty(self.num_embeddings_per_partition),
@@ -178,7 +184,17 @@ class ParallelLMHead(VocabParallelEmbedding):
             if context.is_prefill and not context.is_draft:
                 last_indices = attn_metadata.cu_seqlens_q[1:] - 1
                 x = x[last_indices].contiguous()
-        logits = tgemm.mm(x, self.weight, self.bias)
+        if (
+            self.use_triton_bf16
+            and x.dtype in (torch.bfloat16, torch.float16)
+            and self.weight.dim() == 2
+            and not getattr(self.weight, "is_shuffled", False)
+        ):
+            from atom.model_ops.linear import _triton_bf16_linear_plain
+
+            logits = _triton_bf16_linear_plain(x, self.weight, self.bias, x.dtype)
+        else:
+            logits = tgemm.mm(x, self.weight, self.bias)
         if self.tp_size > 1:
             use_custom = envs.ATOM_USE_CUSTOM_ALL_GATHER
             logits = tensor_model_parallel_all_gather(logits, use_custom=use_custom)
