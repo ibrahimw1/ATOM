@@ -72,41 +72,25 @@ def rmsnorm2d_fwd_with_add_(
     return out.view(ori_shape), residual_out.view(ori_shape)
 
 
-# Triton dispatch for the unquantized BF16/FP16 RMSNorm path. aiter.ops.triton
-# only provides a tuned kernel up to hidden_size=8192; ATOM falls back to the
-# HIP path above for anything wider. Opt-in via RMSNorm(use_triton=True).
+# Plain Triton dispatch helpers — DEFINED ONLY (this bisect step intentionally
+# does not wire them into RMSNorm.forward). If this run still crashes, the
+# mere act of defining these is the trigger.
 _TRITON_BF16_RMSNORM_MAX_DIM = 8192
 
 
-def _triton_rmsnorm2d_fwd_fake(
-    x: torch.Tensor, weight: torch.Tensor, eps: float, dim: int
-) -> torch.Tensor:
-    return torch.empty_like(x)
-
-
-def _triton_rmsnorm2d_fwd_with_add_fake(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    residual: torch.Tensor,
-    eps: float,
-    dim: int,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    return torch.empty_like(x), torch.empty_like(x)
-
-
-@torch_compile_guard(gen_fake=_triton_rmsnorm2d_fwd_fake, mutates_args=[])
-def _triton_rmsnorm2d_fwd_(
+def _triton_rmsnorm2d_fwd_plain(
     x: torch.Tensor, weight: torch.Tensor, eps: float, dim: int
 ) -> torch.Tensor:
     from aiter.ops.triton.normalization.rmsnorm import rms_norm as _triton_rms_norm
 
     ori_shape = x.shape
     x = x.reshape(-1, dim)
-    return _triton_rms_norm(x, weight, eps).view(ori_shape)
+    with torch.no_grad():
+        out = _triton_rms_norm(x, weight, eps)
+    return out.detach().contiguous().view(ori_shape)
 
 
-@torch_compile_guard(gen_fake=_triton_rmsnorm2d_fwd_with_add_fake, mutates_args=[])
-def _triton_rmsnorm2d_fwd_with_add_(
+def _triton_rmsnorm2d_fwd_with_add_plain(
     x: torch.Tensor,
     weight: torch.Tensor,
     residual: torch.Tensor,
@@ -121,8 +105,12 @@ def _triton_rmsnorm2d_fwd_with_add_(
     x = x.reshape(-1, dim)
     out = torch.empty_like(x)
     residual_out = torch.empty_like(x)
-    _triton_rmsnorm_with_add(out, x, residual, residual_out, weight, eps)
-    return out.view(ori_shape), residual_out.view(ori_shape)
+    with torch.no_grad():
+        _triton_rmsnorm_with_add(out, x, residual, residual_out, weight, eps)
+    return (
+        out.detach().contiguous().view(ori_shape),
+        residual_out.detach().contiguous().view(ori_shape),
+    )
 
 
 def fused_rmsnorm_pad_fake_tensors(
@@ -280,7 +268,7 @@ class RMSNorm(nn.Module):
         self.x_pad_to_multiple = x_pad_to_multiple
         self.fused_allreduce = fused_allreduce
         self.use_fused_quant = fused_quant
-        self.use_triton_bf16 = use_triton and dim <= _TRITON_BF16_RMSNORM_MAX_DIM
+        self.use_triton_bf16 = bool(use_triton) and dim <= _TRITON_BF16_RMSNORM_MAX_DIM
         self.tp_size = get_tensor_model_parallel_world_size()
 
         layer_quant_config = (
@@ -387,21 +375,23 @@ class RMSNorm(nn.Module):
                     return x, x_scale
                 return (x, x_scale), residual_out
             else:
+                # NOTE: dispatching to _triton_rmsnorm2d_fwd_plain here (via
+                # an `if self.use_triton_bf16:` branch) reproducibly causes
+                # the AITER FlyDSL MoE heuristic kernel to memory-fault
+                # during gpt-oss-20b warmup, even when the Triton branch is
+                # never taken for the failing layer. Theory: the bytecode
+                # change to RMSNorm.forward invalidates @support_torch_compile
+                # state on GptOssModel, leaving stale CUDA-graph kernel
+                # pointers. Wiring intentionally NOT added here — the helpers
+                # at module top are defined for future use once the
+                # forward-decorator interaction is understood.
                 if residual is None:
-                    if self.use_triton_bf16:
-                        x = _triton_rmsnorm2d_fwd_(x, self.weight, self.eps, self.dim)
-                    else:
-                        x = rmsnorm2d_fwd_(x, self.weight, self.eps, self.dim)
+                    x = rmsnorm2d_fwd_(x, self.weight, self.eps, self.dim)
                     return x
                 else:
-                    if self.use_triton_bf16:
-                        x, residual = _triton_rmsnorm2d_fwd_with_add_(
-                            x, self.weight, residual, self.eps, self.dim
-                        )
-                    else:
-                        x, residual = rmsnorm2d_fwd_with_add_(
-                            x, self.weight, residual, self.eps, self.dim
-                        )
+                    x, residual = rmsnorm2d_fwd_with_add_(
+                        x, self.weight, residual, self.eps, self.dim
+                    )
                     return x, residual
 
 
