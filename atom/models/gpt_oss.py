@@ -210,20 +210,34 @@ class MLPBlock(torch.nn.Module):
             prefix=f"{prefix}.gate",
         )
         assert config.intermediate_size % self.world_size == 0
-        self.experts = FusedMoE(
-            num_experts=config.num_local_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
-            reduce_results=False,
-            renormalize=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.experts",
-            apply_router_weight_on_input=False,
-            has_bias=True,
-            activation=ActivationType.Swiglu,
-            config=config,
-        )
+        # Stage 3: route gpt-oss MoE through aiter Triton (replaces
+        # ck_tile::MoeFlatmmKernel — 884k µs in the baseline trace).
+        # FusedMoE reads ATOM_USE_TRITON_MOE in its quant_method __init__,
+        # so we set it just before constructing self.experts. Restore the
+        # original value afterward to keep the switch model-local.
+        import os as _os
+        _prev_atom_use_triton_moe = _os.environ.get("ATOM_USE_TRITON_MOE")
+        _os.environ["ATOM_USE_TRITON_MOE"] = "1"
+        try:
+            self.experts = FusedMoE(
+                num_experts=config.num_local_experts,
+                top_k=config.num_experts_per_tok,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.intermediate_size,
+                reduce_results=False,
+                renormalize=True,
+                quant_config=quant_config,
+                prefix=f"{prefix}.experts",
+                apply_router_weight_on_input=False,
+                has_bias=True,
+                activation=ActivationType.Swiglu,
+                config=config,
+            )
+        finally:
+            if _prev_atom_use_triton_moe is None:
+                _os.environ.pop("ATOM_USE_TRITON_MOE", None)
+            else:
+                _os.environ["ATOM_USE_TRITON_MOE"] = _prev_atom_use_triton_moe
         # Detect MXFP4 MoE GEMM padding requirement from the quant method.
         # When hidden_size is not aligned to 256, MXFP4 weights are padded
         # and the kernel expects padded input. We handle padding here instead
