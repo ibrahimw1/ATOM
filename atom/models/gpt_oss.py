@@ -36,7 +36,7 @@ from atom.model_ops.base_attention import Attention
 from atom.model_ops.embed_head import ParallelLMHead, VocabParallelEmbedding
 
 # from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
-from atom.model_ops.layernorm import RMSNorm
+from atom.model_ops.layernorm import RMSNorm, TritonRMSNorm
 from atom.model_ops.linear import QKVParallelLinear, ReplicatedLinear, RowParallelLinear
 from atom.model_ops.moe import FusedMoE
 from atom.model_ops.utils import atom_parameter
@@ -307,19 +307,21 @@ class TransformerBlock(torch.nn.Module):
         self.mlp = MLPBlock(atom_config, self.layer_idx, prefix=f"{prefix}.mlp")
         # Fuse MoE AllReduce into input_layernorm for layers > 0.
         # Layer 0 receives already-reduced embedding output, so no fusion needed.
-        self.input_layernorm = RMSNorm(
+        self.input_layernorm = TritonRMSNorm(
             config.hidden_size,
             eps=1e-5,
             fused_allreduce=ENABLE_ALLREDUCE_RMSNORM_FUSION and layer_num > 0,
+            use_triton=True,
         )
         # Fuse o_proj AllReduce into post_attention_layernorm.
         # Padding for MXFP4 MoE GEMM alignment is now handled inside MLPBlock,
         # so this layernorm no longer needs x_pad_to_multiple.
-        self.post_attention_layernorm = RMSNorm(
+        self.post_attention_layernorm = TritonRMSNorm(
             config.hidden_size,
             eps=1e-5,
             fused_allreduce=ENABLE_ALLREDUCE_RMSNORM_FUSION and self.tp_size > 1,
             x_pad_to_multiple=0 if self.tp_size > 1 else 256,
+            use_triton=True,
         )
 
     def forward(
@@ -370,7 +372,7 @@ class GptOssModel(nn.Module):
             ),
             prefix=f"{prefix}.layers",
         )
-        self.norm = RMSNorm(
+        self.norm = TritonRMSNorm(
             self.config.hidden_size,
             eps=1e-5,
             fused_allreduce=ENABLE_ALLREDUCE_RMSNORM_FUSION,

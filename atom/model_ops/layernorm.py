@@ -81,13 +81,18 @@ _TRITON_BF16_RMSNORM_MAX_DIM = 8192
 def _triton_rmsnorm2d_fwd_plain(
     x: torch.Tensor, weight: torch.Tensor, eps: float, dim: int
 ) -> torch.Tensor:
-    from aiter.ops.triton.normalization.rmsnorm import rms_norm as _triton_rms_norm
+    # Use rmsnorm_forward_inference rather than rms_norm: the former does
+    # `.contiguous()` on both x and weight before launching the Triton kernel
+    # and skips the autograd Function wrap, which avoids the kernel reading
+    # garbage when our input came from a reshape that introduced strides.
+    from aiter.ops.triton.normalization.rmsnorm import rmsnorm_forward_inference
 
     ori_shape = x.shape
-    x = x.reshape(-1, dim)
+    x = x.reshape(-1, dim).contiguous()
+    weight_c = weight.contiguous()
     with torch.no_grad():
-        out = _triton_rms_norm(x, weight, eps)
-    return out.detach().contiguous().view(ori_shape)
+        out = rmsnorm_forward_inference(x, weight_c, eps)
+    return out.contiguous().view(ori_shape)
 
 
 def _triton_rmsnorm2d_fwd_with_add_plain(
@@ -102,15 +107,14 @@ def _triton_rmsnorm2d_fwd_with_add_plain(
     )
 
     ori_shape = x.shape
-    x = x.reshape(-1, dim)
+    x = x.reshape(-1, dim).contiguous()
+    residual_c = residual.reshape(-1, dim).contiguous()
+    weight_c = weight.contiguous()
     out = torch.empty_like(x)
     residual_out = torch.empty_like(x)
     with torch.no_grad():
-        _triton_rmsnorm_with_add(out, x, residual, residual_out, weight, eps)
-    return (
-        out.detach().contiguous().view(ori_shape),
-        residual_out.detach().contiguous().view(ori_shape),
-    )
+        _triton_rmsnorm_with_add(out, x, residual_c, residual_out, weight_c, eps)
+    return out.view(ori_shape), residual_out.view(ori_shape)
 
 
 def fused_rmsnorm_pad_fake_tensors(
@@ -393,6 +397,58 @@ class RMSNorm(nn.Module):
                         x, self.weight, residual, self.eps, self.dim
                     )
                     return x, residual
+
+
+class TritonRMSNorm(RMSNorm):
+    """RMSNorm subclass that dispatches the BF16/FP16 path (no x_pad, no fused
+    AllReduce, no fused_quant) through aiter Triton kernels instead of the
+    aiter HIP rmsnorm2d_fwd path.
+
+    Why a subclass and not a flag inside RMSNorm.forward? Adding an
+    `if self.use_triton_bf16:` branch directly inside RMSNorm.forward mutates
+    the bytecode of a method that ends up captured by @support_torch_compile
+    on GptOssModel; the resulting Dynamo / CUDA-graph cache invalidation
+    reliably memory-faults the AITER MoE FlyDSL kernel during warmup on gfx950
+    (reproduced multiple times — see branch-notes.md and CLAUDE.md's rule
+    "NEVER modify @support_torch_compile decorated model files").
+
+    A subclass keeps the parent's forward bytecode untouched. Dynamo sees a
+    different class with a fresh forward; cache key is consistent from the
+    first compile, so nothing gets invalidated mid-flight.
+
+    Paths other than the plain BF16 fallback (x_pad_to_multiple > 0,
+    fused_allreduce, fused_quant) defer to super().forward — gpt-oss
+    instantiates this subclass at every site but the actual Triton dispatch
+    only fires on the plain path.
+    """
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor | None = None,
+        x_scale: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        # Paths 1 / 2 / 3 — let the parent handle them unchanged.
+        if self.x_pad_to_multiple > 0:
+            return super().forward(x, residual, x_scale)
+        if self.fused_allreduce and self.tp_size > 1:
+            return super().forward(x, residual, x_scale)
+        if x_scale is not None and self.use_fused_quant:
+            return super().forward(x, residual, x_scale)
+        if (
+            self.use_fused_quant
+            and x_scale is None
+            and self.quant_type.value in _AITER_RMS_QUANT_TYPE_VALUES
+        ):
+            return super().forward(x, residual, x_scale)
+        # Path 4 — the BF16 fallback we want on Triton.
+        if not self.use_triton_bf16:
+            return super().forward(x, residual, x_scale)
+        if residual is None:
+            return _triton_rmsnorm2d_fwd_plain(x, self.weight, self.eps, self.dim)
+        return _triton_rmsnorm2d_fwd_with_add_plain(
+            x, self.weight, residual, self.eps, self.dim
+        )
 
 
 class RMSNormGated(nn.Module):
