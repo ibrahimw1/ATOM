@@ -56,6 +56,16 @@ from transformers import GptOssConfig
 
 ENABLE_ALLREDUCE_RMSNORM_FUSION = envs.ATOM_ENABLE_ALLREDUCE_RMSNORM_FUSION
 
+# Stage 6 attempt (reverted): force aiter pa_decode_gluon to use its FlyDSL
+# Triton reduce kernel instead of the C++ HIP one (which shows up as
+# aiter::pa_decode_ps_reduce_hip_kernel, ~1,972 µs). The path exists at
+# pa_decode_gluon.py:5086-5125 — set CXX_PS_REDUCE_AVAILABLE=False and the
+# wrapper falls through to launch_pa_decode_ps_reduce_flydsl. BUT the
+# FlyDSL kernel has a bug for our config (no-sinks BF16): hits
+# `NameError: name 'sink_rsrc' is not defined` at pa_decode_gluon.py:4720
+# during the __else_7 branch. Filed under "aiter bug, not ATOM", out of
+# scope for this branch. Leaving the HIP reduce in place.
+
 
 def cdiv(x, y):
     return (x + y - 1) // y
