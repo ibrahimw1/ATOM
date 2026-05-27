@@ -154,7 +154,19 @@ class OAIAttention(nn.Module):
 
 
 def _interleave_swiglu_weights(experts: FusedMoE):
-    """Interleave gate/up weights, scales, and biases for Swiglu activation.
+    """Convert HF GPT-OSS interleaved gate/up rows to concatenated [gate|up].
+
+    HF stores ``gate_up_proj`` rows as ``[g0, u0, g1, u1, ...]``. The AITER
+    HIP fused_moe kernel (gate_mode=SEPARATED) expects the concatenated
+    layout ``[g0, g1, ..., u0, u1, ...]``; this helper performs that flip
+    on weights, scales, and biases.
+
+    Must NOT be called on the triton path: ``triton_kernels.swiglu`` pairs
+    channels as ``a[..., ::2]`` / ``a[..., 1::2]`` and therefore requires
+    the HF interleaved layout to be preserved. See ``MLPBlock.__init__``
+    below where the SwiGLU metadata (``oai_swiglu``, ``swiglu_alpha``,
+    ``swiglu_limit``) is pinned on the FusedMoE layer so both paths know
+    the gpt-oss spec (gate*sigmoid(alpha*gate)*(up+1) with ±limit clamps).
 
     Must run before Mxfp4MoEMethod.process_weights_after_loading (shuffle).
     The loader calls module.process_weights_after_loading() before
@@ -224,6 +236,17 @@ class MLPBlock(torch.nn.Module):
             activation=ActivationType.Swiglu,
             config=config,
         )
+        # Pin gpt-oss OAI asymmetric SwiGLU metadata on the FusedMoE layer
+        # so the triton MoE path uses gate*sigmoid(alpha*gate)*(up+1) with
+        # ±limit clamps. aiter HIP treats swiglu_limit<=0 as "skip clamp"
+        # while triton_kernels clamps to ±limit (limit=0 -> garbage), so we
+        # set explicitly from config for both backends. Matches the gpt-oss
+        # spec; without these the Triton MoE path produces "syntactically
+        # valid English that is topically nonsensical"
+        # (see memory/gpt_oss_atom_correctness_bugs.md Bug 2).
+        self.experts.oai_swiglu = True
+        self.experts.swiglu_alpha = 1.702
+        self.experts.swiglu_limit = float(getattr(config, "swiglu_limit", 7.0))
         # Detect MXFP4 MoE GEMM padding requirement from the quant method.
         # When hidden_size is not aligned to 256, MXFP4 weights are padded
         # and the kernel expects padded input. We handle padding here instead

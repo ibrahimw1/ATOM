@@ -26,6 +26,22 @@ from torch import Tensor, nn
 from torch.overrides import handle_torch_function, has_torch_function_unary
 
 
+def _is_triton_norm_safe(dim: int) -> bool:
+    """Gate the Triton RMSNorm kernel on power-of-2 hidden sizes.
+
+    The aiter Triton kernels under ``aiter.ops.triton.normalization.rmsnorm``
+    (which ``triton_rmsnorm2d_fwd_*`` route to) launch with
+    ``BLOCK_SIZE = triton.next_power_of_2(n_cols)`` and rely on a Triton
+    mask path that has been observed wrong on awkward column counts. Models
+    whose hidden_size is a clean power of 2 (1024, 2048, 4096, 8192) are
+    safe; gpt-oss (``dim=2880``) and any other non-power-of-2 model falls
+    back to the aiter HIP RMSNorm. Defensive gate adopted from the
+    fork/triton branch's `layernorm.py:_is_triton_norm_safe`. Cheap
+    Python-side check, no runtime cost.
+    """
+    return dim > 0 and (dim & (dim - 1)) == 0
+
+
 def silu(input: Tensor, inplace: bool = False) -> Tensor:
     r"""Apply the Sigmoid Linear Unit (SiLU) function, element-wise.
 
@@ -66,13 +82,18 @@ def rmsnorm2d_fwd_with_add_(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     ori_shape = x.shape
     x = x.reshape(-1, dim)
-    if envs.ATOM_USE_TRITON_RMSNORM:
+    if envs.ATOM_USE_TRITON_RMSNORM and _is_triton_norm_safe(dim):
         # Triton _fused_add_rmsnorm_kernel uses input_row_stride for res_in
         # AND res_out (single stride var). If x.stride(0) doesn't match
         # residual's last-dim row stride, the kernel reads/writes wrong
         # addresses. Also assumes last dim contiguous (stride 1). Coerce both
         # x and residual to contiguous (-1, dim) with matching strides before
         # the call.
+        #
+        # The _is_triton_norm_safe(dim) gate above limits this path to
+        # power-of-2 hidden sizes; non-pow2 sizes (e.g. gpt-oss dim=2880)
+        # fall through to the aiter HIP path below because the Triton
+        # kernel's mask path is unreliable on awkward column counts.
         x = x.contiguous()
         residual = residual.reshape(-1, dim).contiguous()
         out = torch.empty_like(x)

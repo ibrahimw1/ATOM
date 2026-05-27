@@ -33,6 +33,21 @@ import os as _os
 # diff way to unlock the Triton SWA path on gpt-oss.
 if _os.getenv("ATOM_USE_TRITON_MHA_PREFILL", "0") == "1":
     _os.environ["ENABLE_CK"] = "0"
+    # Belt-and-suspenders: aiter captures ENABLE_CK at module-import time
+    # (aiter/jit/core.py:29). The env-var flip above ONLY works if no other
+    # module has imported aiter before us. If something does, the captured
+    # constant is already 1 and the dispatch keeps routing to CK. Patch the
+    # already-imported module's attribute too so the dispatch function sees
+    # the flipped value at call time (Python closes over the module global,
+    # not the captured constant). Idea adopted from the fork/triton branch.
+    try:
+        import aiter.ops.mha as _aiter_mha
+
+        _aiter_mha.ENABLE_CK = False
+    except ImportError:
+        # aiter not yet importable — the env var alone will catch it on the
+        # eventual first import. Don't fail ATOM startup.
+        pass
 
 # When ATOM_USE_TRITON_BF16_DENSE=1, also redirect aiter.tuned_gemm's auto-
 # tuned "torch" libtype fallback to use the Triton gemm_a16w16 path. The
