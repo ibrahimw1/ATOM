@@ -12,6 +12,7 @@ Uses a subprocess so the test is isolated from any other test-collection
 side effects (the ATOM test suite has several unrelated import-time issues
 when collected as a whole).
 """
+
 import os
 import subprocess
 import sys
@@ -24,8 +25,7 @@ def test_sampler_imports_without_mix_sample():
     moves the Triton import back to module top, the spawned interpreter will
     exit non-zero with ModuleNotFoundError.
     """
-    code = textwrap.dedent(
-        """
+    code = textwrap.dedent("""
         import sys
 
         class _Blocker:
@@ -45,8 +45,7 @@ def test_sampler_imports_without_mix_sample():
         import atom.model_ops.sampler as sampler
         assert callable(sampler.mixed_sample_outer_exponential)
         print('SAMPLER_IMPORT_OK')
-        """
-    )
+        """)
     env = os.environ.copy()
     # The default test interpreter already has the right PYTHONPATH if the
     # test is invoked via the validate container shell; otherwise the caller
@@ -62,6 +61,6 @@ def test_sampler_imports_without_mix_sample():
         f"subprocess failed (returncode={proc.returncode})\n"
         f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
     )
-    assert "SAMPLER_IMPORT_OK" in proc.stdout, (
-        f"sentinel not found in stdout:\n{proc.stdout}"
-    )
+    assert (
+        "SAMPLER_IMPORT_OK" in proc.stdout
+    ), f"sentinel not found in stdout:\n{proc.stdout}"

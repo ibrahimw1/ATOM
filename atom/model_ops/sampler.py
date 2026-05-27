@@ -23,8 +23,10 @@ def mixed_sample_outer_exponential(*args, **kwargs):
         from aiter.ops.triton.sample.mix_sample import (
             mixed_sample_outer_exponential as _triton_mixed_sample_outer_exponential,
         )
+
         return _triton_mixed_sample_outer_exponential(*args, **kwargs)
     return _hip_mixed_sample_outer_exponential(*args, **kwargs)
+
 
 # Try to import aiter top-k/top-p sampling ops
 try:
@@ -62,6 +64,7 @@ def _exponential_noise(shape, dtype, device) -> torch.Tensor:
         from aiter.ops.triton.rng.exponential import (
             exponential as _triton_exponential,
         )
+
         return _triton_exponential(shape, dtype=dtype, device=device)
     return torch.empty(shape, dtype=dtype, device=device).exponential_(1)
 

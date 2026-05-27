@@ -52,9 +52,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Route mixed_sample_outer_exponential through aiter's Triton drop-in
     # (aiter/ops/triton/sample/mix_sample.py) instead of the aiter HIP kernel.
     # Bit-exact for greedy (temperature==0); same algorithm for stochastic.
-    "ATOM_USE_TRITON_SAMPLE": lambda: (
-        os.getenv("ATOM_USE_TRITON_SAMPLE", "0") == "1"
-    ),
+    "ATOM_USE_TRITON_SAMPLE": lambda: (os.getenv("ATOM_USE_TRITON_SAMPLE", "0") == "1"),
     # Force aiter's paged_attention_decode_v2 to use the FlyDSL Triton reduce
     # kernel instead of the C++ HIP `pa_decode_ps_reduce_hip_kernel`. Done via
     # a monkey-patch of `aiter.ops.triton.gluon.pa_decode_gluon.CXX_PS_REDUCE_AVAILABLE`

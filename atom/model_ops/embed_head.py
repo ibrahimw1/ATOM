@@ -145,6 +145,7 @@ class VocabParallelEmbedding(nn.Module):
                 from aiter.ops.triton.embedding.gather import (
                     gather as _triton_embedding_gather,
                 )
+
                 y = _triton_embedding_gather(x, self.weight)
             else:
                 y = F.embedding(x, self.weight)

@@ -43,6 +43,7 @@ if _os.getenv("ATOM_USE_TRITON_MHA_PREFILL", "0") == "1":
 if _os.getenv("ATOM_USE_TRITON_BF16_DENSE", "0") == "1":
     try:
         import aiter.tuned_gemm as _tg
+
         if "torch" in _tg.solMap and "triton" in _tg.solMap:
             _tg.solMap["torch"] = _tg.solMap["triton"]
     except Exception:
@@ -51,6 +52,7 @@ if _os.getenv("ATOM_USE_TRITON_BF16_DENSE", "0") == "1":
 if _os.getenv("ATOM_USE_TRITON_PA_REDUCE", "0") == "1":
     try:
         import aiter.ops.triton.gluon.pa_decode_gluon as _pa_decode_mod
+
         _pa_decode_mod.CXX_PS_REDUCE_AVAILABLE = False
 
         def _force_pure_triton_fallback(*_a, **_kw):

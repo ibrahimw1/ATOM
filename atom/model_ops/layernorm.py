@@ -80,6 +80,7 @@ def rmsnorm2d_fwd_with_add_(
         from aiter.ops.triton.normalization.rmsnorm import (
             rmsnorm2d_fwd_with_add as _triton_rmsnorm_add,
         )
+
         _triton_rmsnorm_add(out, x, residual, residual_out, weight.contiguous(), eps)
     else:
         out = torch.empty_like(x)
