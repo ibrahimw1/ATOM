@@ -35,6 +35,61 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "ATOM_USE_TRITON_MLA": lambda: os.getenv("ATOM_USE_TRITON_MLA", "0") == "1",
     "ATOM_USE_TRITON_MOE": lambda: os.getenv("ATOM_USE_TRITON_MOE", "0") == "1",
+    # Route unquantized BF16/FP16 dense linears through aiter's Triton
+    # gemm_a16w16 instead of the auto-tuned `tgemm.mm` (which picks aiter's
+    # HIP asm bf16gemm on gfx950). For gpt-oss-120b on 1 GPU this swaps
+    # ~7% of runtime from aiter-hip to Triton with no correctness regression.
+    "ATOM_USE_TRITON_BF16_DENSE": lambda: (
+        os.getenv("ATOM_USE_TRITON_BF16_DENSE", "0") == "1"
+    ),
+    # Route the unquantized RMSNorm-with-add path through aiter's Triton
+    # rmsnorm2d_fwd_with_add (aiter/ops/triton/normalization/rmsnorm.py) instead
+    # of the aiter HIP add_rmsnorm_quant_kernel that fires from the no-quant
+    # fallback. Drop-in; same signature.
+    "ATOM_USE_TRITON_RMSNORM": lambda: (
+        os.getenv("ATOM_USE_TRITON_RMSNORM", "0") == "1"
+    ),
+    # Route mixed_sample_outer_exponential through aiter's Triton drop-in
+    # (aiter/ops/triton/sample/mix_sample.py) instead of the aiter HIP kernel.
+    # Bit-exact for greedy (temperature==0); same algorithm for stochastic.
+    "ATOM_USE_TRITON_SAMPLE": lambda: (os.getenv("ATOM_USE_TRITON_SAMPLE", "0") == "1"),
+    # Force aiter's paged_attention_decode_v2 to use the FlyDSL Triton reduce
+    # kernel instead of the C++ HIP `pa_decode_ps_reduce_hip_kernel`. Done via
+    # a monkey-patch of `aiter.ops.triton.gluon.pa_decode_gluon.CXX_PS_REDUCE_AVAILABLE`
+    # at ATOM startup (in atom/__init__.py). Only safe when the model has
+    # attention sinks (gpt-oss does); models without sinks hit a NameError in
+    # the FlyDSL kernel's no-sinks branch.
+    "ATOM_USE_TRITON_PA_REDUCE": lambda: (
+        os.getenv("ATOM_USE_TRITON_PA_REDUCE", "0") == "1"
+    ),
+    # Route the prefill MHA path through aiter's Triton flash_attn_varlen_func
+    # instead of the CK FmhaFwdKernel. Works on gpt-oss SWA layers now that the
+    # Triton wrapper accepts (window_size_right==0 + causal). Implemented by
+    # setting ENABLE_CK=0 in os.environ from atom/__init__.py BEFORE aiter is
+    # imported (aiter reads ENABLE_CK once at import time). Note: this is a
+    # GLOBAL aiter switch -- it routes every CK-vs-Triton dispatch (not just
+    # MHA) to Triton. Safe on gpt-oss-120b 1-GPU where CK is only ~0.07% of
+    # runtime; for other models, audit which other CK kernels would be
+    # affected before enabling.
+    "ATOM_USE_TRITON_MHA_PREFILL": lambda: (
+        os.getenv("ATOM_USE_TRITON_MHA_PREFILL", "0") == "1"
+    ),
+    # Route VocabParallelEmbedding.forward's TP=1 branch through aiter's Triton
+    # embedding.gather instead of F.embedding (which dispatches to
+    # aten::indexSelectSmallIndex). TP>1 already uses ATOM's local
+    # _masked_embedding_kernel and is unaffected. Drop-in; bit-exact.
+    "ATOM_USE_TRITON_EMBEDDING": lambda: (
+        os.getenv("ATOM_USE_TRITON_EMBEDDING", "0") == "1"
+    ),
+    # Route the sampler's Exp(1) noise generation through aiter's Triton kernel
+    # (aiter.ops.triton.rng.exponential) instead of
+    # torch.empty(...).exponential_(1) which dispatches to aten's Philox RNG
+    # (distribution_elementwise_grid_stride_kernel). NOT bit-exact vs aten
+    # (different RNG family) but distribution-equivalent (mean=1, var=1) and
+    # deterministic given a fixed torch.manual_seed.
+    "ATOM_USE_TRITON_EXPONENTIAL": lambda: (
+        os.getenv("ATOM_USE_TRITON_EXPONENTIAL", "0") == "1"
+    ),
     # --- Kernel Fusion Toggles ---
     # fused_compress_attn: switch between Triton (default historical) and a
     # flydsl drop-in for V4-Pro Compressor (Main BF16 + Indexer FP8) paths.
