@@ -9,7 +9,7 @@ import os
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Optional, Union
+from typing import Any, ClassVar, Literal, Optional, Union
 
 import torch
 from aiter import QuantType
@@ -980,6 +980,29 @@ class Config:
     enable_tbo_decode: bool = False
     enable_low_latency: bool = False
 
+    # --- Per-family Triton backend selectors ---
+    # Each field flips one op family between the AITER HIP/ASM kernel surface
+    # and the Triton equivalent. Defaults to "aiter" so existing behavior is
+    # preserved. Resolution precedence (applied in __post_init__):
+    #   1. dataclass default ("aiter")
+    #   2. constructor argument (anything the caller passed in)
+    #   3. umbrella ATOM_BACKEND env, if set and the per-family env is unset
+    #   4. per-family ATOM_<FAMILY>_BACKEND env (always wins)
+    # The legacy ATOM_USE_TRITON_* envs continue to work and are the actual
+    # implementation switches at the dispatch sites; these fields are a
+    # higher-level convenience that maps onto them. atom/__init__.py expands
+    # the new envs into the legacy ones BEFORE the import-time monkey-patches
+    # run, so behavior is identical whether the user sets the umbrella, the
+    # per-family env, or the legacy env directly.
+    # The "ATOM_BACKEND=triton ATOM_LINEAR_BACKEND=aiter" bisecting idiom
+    # ("everything Triton except linear") works because per-family wins.
+    attention_backend: Literal["aiter", "triton"] = "aiter"
+    linear_backend: Literal["aiter", "triton"] = "aiter"
+    norm_backend: Literal["aiter", "triton"] = "aiter"
+    sampler_backend: Literal["aiter", "triton"] = "aiter"
+    embedding_backend: Literal["aiter", "triton"] = "aiter"
+    moe_backend: Literal["aiter", "triton"] = "aiter"
+
     # only use for plugin mode
     plugin_config: Optional[PluginConfig] = None
     # only for quark_online_quantization
@@ -1124,6 +1147,38 @@ class Config:
                     "(SWA buffer is not cacheable); disabling automatically."
                 )
                 self.enable_prefix_caching = False
+
+        # --- Resolve per-family backend selectors from env ---
+        # Precedence: dataclass default → ctor arg → umbrella ATOM_BACKEND →
+        # per-family ATOM_<FAMILY>_BACKEND (per-family wins). The env-mapping
+        # into the legacy ATOM_USE_TRITON_* envs happens in atom/__init__.py
+        # BEFORE the import-time monkey-patches run; here we just keep the
+        # Config fields in sync so code that reads `config.linear_backend`
+        # (rather than the env) sees the resolved value.
+        _backend_fields = (
+            ("attention_backend", "ATOM_ATTENTION_BACKEND"),
+            ("linear_backend", "ATOM_LINEAR_BACKEND"),
+            ("norm_backend", "ATOM_NORM_BACKEND"),
+            ("sampler_backend", "ATOM_SAMPLER_BACKEND"),
+            ("embedding_backend", "ATOM_EMBEDDING_BACKEND"),
+            ("moe_backend", "ATOM_MOE_BACKEND"),
+        )
+        _umbrella = os.environ.get("ATOM_BACKEND")
+        if _umbrella is not None and _umbrella not in ("aiter", "triton"):
+            raise ValueError(
+                f"ATOM_BACKEND must be 'aiter' or 'triton', got {_umbrella!r}"
+            )
+        for _field_name, _env_name in _backend_fields:
+            _env_val = os.environ.get(_env_name)
+            if _env_val is None and _umbrella is not None:
+                _env_val = _umbrella
+            if _env_val is None:
+                continue
+            if _env_val not in ("aiter", "triton"):
+                raise ValueError(
+                    f"{_env_name} must be 'aiter' or 'triton', got {_env_val!r}"
+                )
+            setattr(self, _field_name, _env_val)
 
     def compute_hash(self) -> str:
         """

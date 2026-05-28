@@ -20,6 +20,52 @@
 # required regardless of speed.
 import os as _os
 
+# --- Expand new backend envs into legacy ATOM_USE_TRITON_* envs ---
+# The downstream dispatch sites (linear.py, layernorm.py, embed_head.py,
+# sampler.py, fused_moe_triton.py) still read the legacy ATOM_USE_TRITON_*
+# envs. The new ATOM_BACKEND / ATOM_<FAMILY>_BACKEND envs are a higher-level
+# convenience: this block translates them into the legacy envs BEFORE the
+# import-time monkey-patches below run, so all three knob styles (legacy
+# env, per-family env, umbrella env) end up driving the same code path.
+#
+# Precedence: per-family > umbrella > unset (no change to legacy envs).
+# Per-family wins so `ATOM_BACKEND=triton ATOM_LINEAR_BACKEND=aiter` is the
+# "everything Triton except linear" bisecting idiom.
+#
+# setdefault() is used for legacy envs: an explicit `ATOM_USE_TRITON_MOE=0`
+# from the caller is preserved (not overwritten by ATOM_BACKEND=triton).
+_BACKEND_TO_LEGACY = {
+    "ATTENTION": ["ATOM_USE_TRITON_MHA_PREFILL"],
+    "LINEAR": ["ATOM_USE_TRITON_BF16_DENSE"],
+    "NORM": ["ATOM_USE_TRITON_RMSNORM"],
+    "SAMPLER": ["ATOM_USE_TRITON_SAMPLE", "ATOM_USE_TRITON_EXPONENTIAL"],
+    "EMBEDDING": ["ATOM_USE_TRITON_EMBEDDING"],
+    "MOE": ["ATOM_USE_TRITON_MOE"],
+    # PA_REDUCE is intentionally NOT mapped to attention=triton: the pure
+    # Triton paged-attention reduce kernel is ~75x slower than HIP on long
+    # contexts, so it must remain an explicit opt-in for audit runs only.
+}
+_umbrella_backend = _os.environ.get("ATOM_BACKEND")
+if _umbrella_backend not in (None, "aiter", "triton"):
+    raise ValueError(
+        f"ATOM_BACKEND must be 'aiter' or 'triton', got {_umbrella_backend!r}"
+    )
+for _family, _legacy_envs in _BACKEND_TO_LEGACY.items():
+    _fam_env = _os.environ.get(f"ATOM_{_family}_BACKEND")
+    if _fam_env not in (None, "aiter", "triton"):
+        raise ValueError(
+            f"ATOM_{_family}_BACKEND must be 'aiter' or 'triton', got {_fam_env!r}"
+        )
+    _resolved = _fam_env if _fam_env is not None else _umbrella_backend
+    if _resolved == "triton":
+        for _le in _legacy_envs:
+            _os.environ.setdefault(_le, "1")
+# attention=triton also wants FLASH_ATTENTION_TRITON_AMD_ENABLE on (the
+# Triton FA backend reads it). Tied to the legacy env so it's right
+# regardless of which knob style the user used to flip MHA prefill.
+if _os.environ.get("ATOM_USE_TRITON_MHA_PREFILL") == "1":
+    _os.environ.setdefault("FLASH_ATTENTION_TRITON_AMD_ENABLE", "TRUE")
+
 # When ATOM_USE_TRITON_MHA_PREFILL=1, force aiter's flash_attn_varlen_func
 # (called by ATOM's prefill path) to route through the Triton MHA kernel
 # (aiter/ops/triton/attention/mha.py) instead of CK's FmhaFwdKernel. aiter
