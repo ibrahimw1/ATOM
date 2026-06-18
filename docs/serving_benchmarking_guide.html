@@ -494,7 +494,10 @@
 <li class="toctree-l3"><a class="reference internal" href="vllm_plugin_backend_guide.html#disable-atom-plugin">5.6 Disable ATOM Plugin</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="vllm_plugin_backend_guide.html#environment-variables">6. Environment Variables</a></li>
+<li class="toctree-l2"><a class="reference internal" href="vllm_plugin_backend_guide.html#environment-variables">6. Environment Variables</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="vllm_plugin_backend_guide.html#online-quantization">Online quantization</a></li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
@@ -1356,11 +1359,15 @@ token if all drafts are accepted.</p></li>
 <tbody>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--method</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">None</span></code></p></td>
-<td><p>Speculative method; currently only <code class="docutils literal notranslate"><span class="pre">mtp</span></code> is supported</p></td>
+<td><p>Speculative method: <code class="docutils literal notranslate"><span class="pre">mtp</span></code> (DeepSeek MTP) or <code class="docutils literal notranslate"><span class="pre">eagle3</span></code> (EAGLE 3 / EAGLE 3.1 — see <a class="reference internal" href="eagle3_speculative_decoding.html"><span class="std std-doc"><code class="docutils literal notranslate"><span class="pre">eagle3_speculative_decoding.md</span></code></span></a>)</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--num-speculative-tokens</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">1</span></code></p></td>
 <td><p>Number of draft tokens per iteration (draft model runs this many autoregressive steps)</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--draft-model</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">None</span></code></p></td>
+<td><p>Path or HF repo of the speculative draft model. Required for <code class="docutils literal notranslate"><span class="pre">--method</span> <span class="pre">eagle3</span></code>; the draft’s <code class="docutils literal notranslate"><span class="pre">config.json</span></code> drives EAGLE 3 vs EAGLE 3.1 toggles automatically</p></td>
 </tr>
 </tbody>
 </table>

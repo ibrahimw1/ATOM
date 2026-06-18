@@ -492,7 +492,10 @@
 <li class="toctree-l3"><a class="reference internal" href="vllm_plugin_backend_guide.html#disable-atom-plugin">5.6 Disable ATOM Plugin</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="vllm_plugin_backend_guide.html#environment-variables">6. Environment Variables</a></li>
+<li class="toctree-l2"><a class="reference internal" href="vllm_plugin_backend_guide.html#environment-variables">6. Environment Variables</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="vllm_plugin_backend_guide.html#online-quantization">Online quantization</a></li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
@@ -627,11 +630,6 @@
 <td><p>0 (false)</p></td>
 <td><p>If set to <code class="docutils literal notranslate"><span class="pre">1</span></code>, disable the vLLM plugin registration entirely.</p></td>
 </tr>
-<tr class="row-odd"><td><p><strong>ATOM_DISABLE_VLLM_PLUGIN_ATTENTION</strong></p></td>
-<td><p>bool</p></td>
-<td><p>0 (false)</p></td>
-<td><p>If set to <code class="docutils literal notranslate"><span class="pre">1</span></code>, disable only the vLLM attention plugin while keeping other plugins active.</p></td>
-</tr>
 </tbody>
 </table>
 </section>
@@ -652,7 +650,12 @@
 <td><p>0 (false)</p></td>
 <td><p>If set to <code class="docutils literal notranslate"><span class="pre">1</span></code>, use AITER Triton FP4 weight preshuffled GEMM. Otherwise use AITER ASM FP4 weight preshuffled GEMM.</p></td>
 </tr>
-<tr class="row-odd"><td><p><strong>ATOM_USE_TRITON_MXFP4_BMM</strong></p></td>
+<tr class="row-odd"><td><p><strong>ATOM_USE_FP4_NON_SHUFFLE_TRITON_GEMM</strong></p></td>
+<td><p>bool</p></td>
+<td><p>0 (false)</p></td>
+<td><p>If set to <code class="docutils literal notranslate"><span class="pre">1</span></code>, use AITER Triton FP4 GEMM with non-shuffled weights. Takes precedence over the FP4 preshuffled GEMM path selected by <code class="docutils literal notranslate"><span class="pre">ATOM_USE_TRITON_GEMM</span></code>.</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>ATOM_USE_TRITON_MXFP4_BMM</strong></p></td>
 <td><p>bool</p></td>
 <td><p>0 (false)</p></td>
 <td><p>If set to <code class="docutils literal notranslate"><span class="pre">1</span></code>, use FP4 BMM in MLA attention module.</p></td>
