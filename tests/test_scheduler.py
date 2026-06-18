@@ -2,8 +2,13 @@
 # Tests for atom/model_engine/scheduler.py — public API only
 
 
-from atom.model_engine.scheduler import Scheduler, ScheduledBatchOutput, SpecStats
-from atom.model_engine.sequence import SequenceStatus, SequenceType
+from atom.model_engine.scheduler import (
+    ScheduledBatch,
+    Scheduler,
+    ScheduledBatchOutput,
+    SpecStats,
+)
+from atom.model_engine.sequence import Sequence, SequenceStatus, SequenceType
 from atom.sampling_params import SamplingParams
 from conftest import MockConfig
 
@@ -83,11 +88,20 @@ class TestSchedule:
         assert batch.total_seqs_num_prefill == 2
 
     def test_prefill_respects_max_batched_tokens(self, seq_factory):
-        sched = Scheduler(MockConfig(max_num_batched_tokens=6, num_kvcache_blocks=100))
+        sched = Scheduler(
+            MockConfig(
+                max_num_batched_tokens=6,
+                num_kvcache_blocks=100,
+                enable_chunked_prefill=True,
+            )
+        )
         sched.add(seq_factory([1, 2, 3, 4]))  # 4 tokens
-        sched.add(seq_factory([5, 6, 7, 8]))  # 4 more → 8 > 6
+        sched.add(seq_factory([5, 6, 7, 8]))  # 4 tokens total, but only 2 fit in budget
         batch, _ = sched.schedule()
-        assert batch.total_seqs_num_prefill == 1
+        # Chunked prefill: seq2 gets a 2-token chunk (budget 6-4=2)
+        assert batch.total_seqs_num_prefill == 2
+        assert batch.total_tokens_num_prefill == 6
+        assert list(batch.num_scheduled_tokens) == [4, 2]
 
     def test_prefill_respects_block_availability(self, seq_factory):
         sched = Scheduler(MockConfig(num_kvcache_blocks=1, kv_cache_block_size=4))
@@ -100,6 +114,7 @@ class TestSchedule:
         seq = seq_factory([1, 2, 3, 4])
         scheduler.add(seq)
         scheduler.schedule()  # prefill
+        seq.num_cached_tokens = seq.num_prompt_tokens  # simulate forward pass
         seq.append_token(5)
         batch, _ = scheduler.schedule()  # decode
         assert batch.total_seqs_num_decode == 1
@@ -111,6 +126,8 @@ class TestSchedule:
         sched.add(s1)
         sched.add(s2)
         sched.schedule()  # prefill both
+        s1.num_cached_tokens = s1.num_prompt_tokens  # simulate forward pass
+        s2.num_cached_tokens = s2.num_prompt_tokens
         s1.append_token(9)
         s2.append_token(10)
         sched.schedule()  # one preempted
@@ -147,7 +164,8 @@ class TestPrefixCaching:
         batch1, _ = sched.schedule()
         assert batch1.total_tokens_num_prefill == 9  # no cache, all tokens
 
-        # Complete seq1 so its blocks are freed (but hashes remain)
+        # Complete seq1 so its blocks are freed (but hashes remain).
+        # `batch=batch1` is required for postprocess to call hash_blocks().
         seq1.append_token(2)  # EOS
         sched.postprocess(
             list(sched.running),
@@ -158,6 +176,7 @@ class TestPrefixCaching:
                 num_bonus=None,
                 draft_token_ids=None,
             ),
+            batch=batch1,
         )
 
         # Second request shares the same prefix, differs in last block
@@ -178,7 +197,7 @@ class TestPrefixCaching:
 
         seq1 = seq_factory([1, 2, 3, 4, 5, 6, 7, 8, 9])
         sched.add(seq1)
-        sched.schedule()
+        batch1, _ = sched.schedule()
 
         seq1.append_token(2)  # EOS
         sched.postprocess(
@@ -190,6 +209,7 @@ class TestPrefixCaching:
                 num_bonus=None,
                 draft_token_ids=None,
             ),
+            batch=batch1,
         )
 
         seq2 = seq_factory([1, 2, 3, 4, 5, 6, 7, 8, 10, 11])
@@ -352,9 +372,61 @@ class TestGetNextBatchInfo:
         assert num_reqs == 1
 
     def test_running(self, scheduler, seq_factory):
-        scheduler.add(seq_factory([1, 2, 3, 4]))
+        seq = seq_factory([1, 2, 3, 4])
+        scheduler.add(seq)
         scheduler.schedule()
+        seq.num_cached_tokens = seq.num_prompt_tokens  # simulate forward pass
         is_prefill, n, num_reqs = scheduler.get_next_batch_info()
         assert is_prefill is False
         assert n == 1
         assert num_reqs == 1
+
+
+# ── ScheduledBatch: PD consumer first decode primed with T0 + drafts (MTP) ──
+
+
+class TestScheduledBatchPDFirstDecodeMTP:
+
+    def test_first_decode_slices_t0_then_drafts(self):
+        mtp_k = 3
+        prompt_tok, t0 = 6366, 14
+        drafts = [101, 102, 103]  # mtp_k transferred drafts
+        seq = Sequence([prompt_tok], block_size=16)  # 1-token prompt
+        seq.append_token(t0)  # injected T0
+        for d in drafts:  # primed drafts
+            seq.append_token(d)
+        seq.type = SequenceType.DECODE
+        assert seq.num_tokens == 1 + 1 + mtp_k  # prompt + T0 + drafts
+
+        batch = ScheduledBatch(
+            seqs={seq.id: seq},
+            num_scheduled_tokens=[mtp_k + 1],
+            total_tokens_num=mtp_k + 1,
+            total_tokens_num_decode=mtp_k + 1,
+            total_seqs_num=1,
+            total_seqs_num_decode=1,
+            num_spec_step=mtp_k,
+        )
+
+        assert list(batch.scheduled_tokens) == [t0, *drafts]
+
+    def test_normal_decode_window_unchanged(self):
+        """offset >= 0 path is byte-for-byte the trailing mtp_k+1 slice."""
+        mtp_k = 3
+        toks = list(range(100, 110))  # 10 tokens, ample context
+        seq = Sequence(toks[:6], block_size=16)
+        for t in toks[6:]:
+            seq.append_token(t)
+        seq.type = SequenceType.DECODE
+
+        batch = ScheduledBatch(
+            seqs={seq.id: seq},
+            num_scheduled_tokens=[mtp_k + 1],
+            total_tokens_num=mtp_k + 1,
+            total_tokens_num_decode=mtp_k + 1,
+            total_seqs_num=1,
+            total_seqs_num_decode=1,
+            num_spec_step=mtp_k,
+        )
+
+        assert list(batch.scheduled_tokens) == toks[-(mtp_k + 1) :]
