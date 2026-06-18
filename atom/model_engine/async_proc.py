@@ -15,6 +15,7 @@ This module provides:
 
 import logging
 import multiprocessing
+import os
 import pickle
 import queue
 import threading
@@ -66,9 +67,33 @@ class AsyncIOProc:
         runner_qualname: str,
         rank: int,
         kv_output_addr: str | None = None,
+        all_ranks_barrier=None,
         *args,
         **kwargs,
     ):
+        # Per-rank CPU/NUMA pinning. Must run before any large allocation so
+        # Linux first-touch places memory on the local NUMA node (implicit
+        # membind without libnuma). Gated by env so baseline/pinned A/B is free.
+        # The global GPU index is dp_rank * tp_size + tp_rank (see
+        # engine_core_mgr GPU assignment); the `rank` arg is only the TP-local
+        # rank, which is always 0 under DP-attention (tp_size == 1 per engine).
+        if os.environ.get("ATOM_CPU_AFFINITY", "0") == "1":
+            try:
+                cfg = args[0]
+                tp_size = cfg.tensor_parallel_size
+                dp_size = cfg.parallel_config.data_parallel_size
+                dp_rank = cfg.parallel_config.data_parallel_rank
+                world = dp_size * tp_size
+                gpu = dp_rank * tp_size + rank
+                per = os.cpu_count() // world
+                lo = gpu * per
+                os.sched_setaffinity(0, set(range(lo, lo + per)))
+                logger.info(
+                    f"AsyncIOProc({label}): gpu={gpu}/{world} "
+                    f"pinned to cores {lo}-{lo + per - 1}"
+                )
+            except Exception as e:
+                logger.warning(f"AsyncIOProc({label}): CPU affinity skipped: {e}")
         self.label = f"AsyncIOProc({label})"
         self.io_addrs = io_addrs
         self.io_queues = queue.Queue(), queue.Queue()
@@ -106,6 +131,8 @@ class AsyncIOProc:
             )
             t.start()
             self.io_threads.append(t)
+
+        self.all_ranks_barrier = all_ranks_barrier
 
         runner_class = resolve_obj_by_qualname(runner_qualname)
         self.runners: list[object] = []
@@ -162,15 +189,22 @@ class AsyncIOProc:
                 serialized_obj = pickle.dumps(result)
                 socket.send(serialized_obj)
 
+    # Functions that require all TP ranks to synchronize via barrier before
+    # rank 0 returns, so the caller can safely reuse/overwrite shared buffers.
+    _BARRIER_FUNCS = {"update_weights_from_ipc", "update_weights_from_shm"}
+
     def busy_loop(self):
         """Main event loop: dequeue RPCs and dispatch to runners."""
         while True:
             func_name, args = self.get_func()
+            need_barrier = func_name in self._BARRIER_FUNCS
             for runner in self.runners:
                 func = getattr(runner, func_name, None)
                 if func is None:
                     continue
                 out = func(*args)
+                if need_barrier and self.all_ranks_barrier is not None:
+                    self.all_ranks_barrier.wait()
                 if out is not None:
                     if (
                         self.io_addrs[1] is not None
@@ -179,7 +213,6 @@ class AsyncIOProc:
                         self.io_queues[1].put_nowait(out)
                     if self.kv_queue is not None and func_name in self._KV_FUNC_NAMES:
                         self.kv_queue.put_nowait(out)
-
             if func_name == "exit":
                 break
         logger.debug(f"{self.label}: exit busy_loop...")
@@ -227,6 +260,7 @@ class AsyncIOProcManager:
         import atexit
 
         atexit.register(self._cleanup_shared_memory)
+        self.all_ranks_barrier = ctx.Barrier(proc_num)
         init_exit_handler(self)
 
         # KV output aggregation infrastructure
@@ -252,6 +286,7 @@ class AsyncIOProcManager:
                     runner,
                     i,
                     self.kv_output_addrs[i],
+                    self.all_ranks_barrier,
                     *args,
                 ),
             )
