@@ -27,34 +27,40 @@ from atom.utils import envs
 
 if envs.ATOM_USE_TRITON_GEMM or envs.ATOM_USE_TRITON_MOE:
     from aiter.ops.triton.moe.moe_routing.routing import routing
-    from aiter.ops.triton.moe.moe_op_gemm_a8w4 import (
-        moe_gemm_a8w4,
-        swizzle_scales as swizzle_scales_a8w4,
-    )
-    from aiter.ops.triton.moe.moe_op_gemm_a16w4 import (
-        moe_gemm_a16w4,
-    )
+    from aiter.ops.triton.moe.moe_op_gemm_a8w4 import moe_gemm_a8w4
+    from aiter.ops.triton.moe.moe_op_gemm_a16w4 import moe_gemm_a16w4
     from aiter.ops.triton.moe.moe_op_gemm_a4w4 import (
         moe_gemm_a4w4,
         mxfp4_quant,
-        swizzle_scales as swizzle_scales_cdna4,
     )
+    from aiter.ops.triton.utils.shuffle import shuffle_scale_moe
     from aiter.ops.triton.moe.quant_moe import downcast_to_static_fp8
 
 from atom.model_ops.moe import MoEActivationQuant
 
 
 def _swizzle_scales_for_kernel(scale, act_quant: MoEActivationQuant):
-    """Swizzle MoE weight scales for the kernel that act_quant selects.
+    """Shuffle MoE weight scales via aiter's unified ``shuffle_scale_moe``.
 
-    FP8 (a8w4): arch-agnostic swizzle (CDNA4 on gfx950, GFX1250 on gfx1250).
-    BF16/FP4 (a16w4/a4w4): CDNA4 swizzle on gfx942/gfx950, no swizzle elsewhere.
+    Upstream aiter removed the per-kernel ``swizzle_scales`` helpers and moved
+    scale shuffling to ``aiter.ops.triton.utils.shuffle.shuffle_scale_moe`` (one
+    shuffle for the a8w4/a8w8/a16w4/a4w4 family); the caller supplies the matching
+    ``SWIZZLE_MX_SCALE`` label. gfx950/gfx1250 use preshuffle_factor=32,
+    scale_kwidth=8; other arches have no preshuffle path so pass raw scales.
+    ``act_quant`` no longer selects the shuffle (unified across w4/w8) but is kept
+    for call-site compatibility.
     """
-    if act_quant == MoEActivationQuant.FP8:
-        return swizzle_scales_a8w4(scale)
-    # TODO: move arch dispatch into aiter's a4w4/a16w4 swizzle_scales (like a8w4)
-    if get_arch() in ("gfx942", "gfx950"):
-        return swizzle_scales_cdna4(scale), "CDNA4_SCALE"
+    arch = get_arch()
+    if arch == "gfx950":
+        return (
+            shuffle_scale_moe(scale, arch="gfx950", preshuffle_factor=32, scale_kwidth=8),
+            "CDNA4_SCALE",
+        )
+    if arch == "gfx1250":
+        return (
+            shuffle_scale_moe(scale, arch="gfx1250", preshuffle_factor=32, scale_kwidth=8),
+            "GFX1250_SCALE",
+        )
     return scale, None
 
 
@@ -287,6 +293,7 @@ def triton_kernel_fused_experts(
                 alpha=swiglu_alpha,
                 limit=swiglu_limit,
                 swiglu_add_residual=True,  # gpt-oss `(up + 1)`
+                use_gluon=envs.ATOM_USE_GLUON_MOE_A16W4,
             )
             output_tensor = moe_gemm_a16w4(
                 interm_cache,
@@ -300,6 +307,7 @@ def triton_kernel_fused_experts(
                 scatter_indx=scatter_indx,
                 gammas=None if apply_router_weight_on_input else gammas,
                 swizzle_mx_scale=w2_swizzle_layout,
+                use_gluon=envs.ATOM_USE_GLUON_MOE_A16W4,
             )
     else:
         # SiLU (DeepSeek): concatenated [gate | up] layout, manual activation.

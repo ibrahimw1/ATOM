@@ -44,6 +44,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("ATOM_USE_TRITON_MLA_SHUFFLE_KV", "0") == "1"
     ),
     "ATOM_USE_TRITON_MOE": lambda: os.getenv("ATOM_USE_TRITON_MOE", "0") == "1",
+    # Route the a16w4 MoE expert GEMM (bf16 act x MXFP4 weights) through the
+    # Gluon kernel (aiter _gluon_kernels/gfx950/moe) instead of the default
+    # Triton kernel. Opt-in (default off): the Gluon path lifts AITER Gluon
+    # coverage but is currently slower than the tuned Triton kernel for this
+    # mixed-precision op (Gluon lacks the fused bf16xfp4 dequant MFMA).
+    "ATOM_USE_GLUON_MOE_A16W4": lambda: (
+        os.getenv("ATOM_USE_GLUON_MOE_A16W4", "0") == "1"
+    ),
     # Route unquantized BF16/FP16 dense linears through aiter's Triton
     # gemm_a16w16 instead of the auto-tuned `tgemm.mm` (which picks aiter's
     # HIP asm bf16gemm on gfx950). For gpt-oss-120b on 1 GPU this swaps
