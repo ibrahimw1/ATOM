@@ -63,6 +63,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "ATOM_USE_TRITON_MOE_DECODE": lambda: os.getenv("ATOM_USE_TRITON_MOE_DECODE", "0")
     == "1",
     "ATOM_MLA_PAGE_SIZE": lambda: int(os.getenv("ATOM_MLA_PAGE_SIZE", "1")),
+    # Route VocabParallelEmbedding.forward's TP=1 branch through aiter's Triton
+    # embedding.gather instead of F.embedding (which dispatches to
+    # aten::indexSelectSmallIndex). TP>1 already uses ATOM's local
+    # _masked_embedding_kernel and is unaffected. Drop-in; bit-exact.
+    "ATOM_USE_TRITON_EMBEDDING": lambda: (
+        os.getenv("ATOM_USE_TRITON_EMBEDDING", "0") == "1"
+    ),
     # --- Kernel Fusion Toggles ---
     # fused_compress_attn: switch between Triton (default historical) and a
     # flydsl drop-in for V4-Pro Compressor (Main BF16 + Indexer FP8) paths.
