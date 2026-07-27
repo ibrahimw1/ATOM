@@ -63,6 +63,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "ATOM_USE_TRITON_MOE_DECODE": lambda: os.getenv("ATOM_USE_TRITON_MOE_DECODE", "0")
     == "1",
     "ATOM_MLA_PAGE_SIZE": lambda: int(os.getenv("ATOM_MLA_PAGE_SIZE", "1")),
+    # Force aiter's paged_attention_decode_v2 reduce step onto the pure Triton
+    # paged_attention_decode_ps_reduce_kernel instead of the C++ HIP variant,
+    # via a monkey-patch of aiter.ops.triton.gluon.pa_decode_gluon at ATOM
+    # startup (see atom/__init__.py). The reduce only runs when the decode is
+    # split across context partitions, so on short contexts this lever is a
+    # no-op. When it does engage it is ~75x slower than HIP: coverage runs
+    # only, never a timing run.
+    "ATOM_USE_TRITON_PA_REDUCE": lambda: (
+        os.getenv("ATOM_USE_TRITON_PA_REDUCE", "0") == "1"
+    ),
     # Route the prefill MHA path through aiter's Triton flash_attn_varlen_func
     # instead of the CK FmhaFwdKernel. Works on gpt-oss SWA layers now that the
     # Triton wrapper accepts (window_size_right==0 + causal). Implemented by
