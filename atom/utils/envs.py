@@ -63,6 +63,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "ATOM_USE_TRITON_MOE_DECODE": lambda: os.getenv("ATOM_USE_TRITON_MOE_DECODE", "0")
     == "1",
     "ATOM_MLA_PAGE_SIZE": lambda: int(os.getenv("ATOM_MLA_PAGE_SIZE", "1")),
+    # Route mixed_sample_outer_exponential through aiter's Triton drop-in
+    # (aiter/ops/triton/sample/mix_sample.py) instead of the aiter HIP kernel.
+    # Bit-exact for greedy (temperature==0); same algorithm for stochastic.
+    "ATOM_USE_TRITON_SAMPLE": lambda: (os.getenv("ATOM_USE_TRITON_SAMPLE", "0") == "1"),
+    # Route the sampler's Exp(1) noise generation through aiter's Triton kernel
+    # (aiter.ops.triton.rng.exponential) instead of
+    # torch.empty(...).exponential_(1) which dispatches to aten's Philox RNG
+    # (distribution_elementwise_grid_stride_kernel). NOT bit-exact vs aten
+    # (different RNG family) but distribution-equivalent (mean=1, var=1) and
+    # deterministic given a fixed torch.manual_seed.
+    "ATOM_USE_TRITON_EXPONENTIAL": lambda: (
+        os.getenv("ATOM_USE_TRITON_EXPONENTIAL", "0") == "1"
+    ),
     # Route VocabParallelEmbedding.forward's TP=1 branch through aiter's Triton
     # embedding.gather instead of F.embedding (which dispatches to
     # aten::indexSelectSmallIndex). TP>1 already uses ATOM's local
