@@ -63,27 +63,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "ATOM_USE_TRITON_MOE_DECODE": lambda: os.getenv("ATOM_USE_TRITON_MOE_DECODE", "0")
     == "1",
     "ATOM_MLA_PAGE_SIZE": lambda: int(os.getenv("ATOM_MLA_PAGE_SIZE", "1")),
-    # Force aiter's paged_attention_decode_v2 reduce step onto the pure Triton
-    # paged_attention_decode_ps_reduce_kernel instead of the C++ HIP variant,
-    # via a monkey-patch of aiter.ops.triton.gluon.pa_decode_gluon at ATOM
-    # startup (see atom/__init__.py). The reduce only runs when the decode is
-    # split across context partitions, so on short contexts this lever is a
-    # no-op. When it does engage it is ~75x slower than HIP: coverage runs
-    # only, never a timing run.
-    "ATOM_USE_TRITON_PA_REDUCE": lambda: (
-        os.getenv("ATOM_USE_TRITON_PA_REDUCE", "0") == "1"
-    ),
-    # Route the prefill MHA path through aiter's Triton flash_attn_varlen_func
-    # instead of the CK FmhaFwdKernel. Works on gpt-oss SWA layers now that the
-    # Triton wrapper accepts (window_size_right==0 + causal). Implemented by
-    # setting ENABLE_CK=0 in os.environ from atom/__init__.py BEFORE aiter is
-    # imported (aiter reads ENABLE_CK once at import time). Note: this is a
-    # GLOBAL aiter switch -- it routes every CK-vs-Triton dispatch (not just
-    # MHA) to Triton. Safe on gpt-oss-120b 1-GPU where CK is only ~0.2% of
-    # runtime; for other models, audit which other CK kernels would be
-    # affected before enabling.
-    "ATOM_USE_TRITON_MHA_PREFILL": lambda: (
-        os.getenv("ATOM_USE_TRITON_MHA_PREFILL", "0") == "1"
+    # Route unquantized BF16/FP16 dense linears through aiter's Triton
+    # gemm_a16w16 instead of the auto-tuned `tgemm.mm` (which picks aiter's
+    # HIP asm bf16gemm on gfx950). For gpt-oss-120b on 1 GPU this swaps
+    # ~7% of runtime from aiter-hip to Triton with no correctness regression.
+    "ATOM_USE_TRITON_BF16_DENSE": lambda: (
+        os.getenv("ATOM_USE_TRITON_BF16_DENSE", "0") == "1"
     ),
     # Route the unquantized RMSNorm-with-add path through aiter's Triton
     # rmsnorm2d_fwd_with_add (aiter/ops/triton/normalization/rmsnorm.py) instead
@@ -96,6 +81,36 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (aiter/ops/triton/sample/mix_sample.py) instead of the aiter HIP kernel.
     # Bit-exact for greedy (temperature==0); same algorithm for stochastic.
     "ATOM_USE_TRITON_SAMPLE": lambda: (os.getenv("ATOM_USE_TRITON_SAMPLE", "0") == "1"),
+    # Force aiter's paged_attention_decode_v2 reduce step onto the pure Triton
+    # `paged_attention_decode_ps_reduce_kernel` instead of the C++ HIP
+    # `pa_decode_ps_reduce_hip_kernel`. Done via a monkey-patch of
+    # `aiter.ops.triton.gluon.pa_decode_gluon` at ATOM startup (in
+    # atom/__init__.py). The reduce only runs when the decode spans more than
+    # one context partition, so on short contexts this lever is a no-op. When
+    # it does engage it is ~75x slower than HIP: coverage runs only, never a
+    # timing run.
+    "ATOM_USE_TRITON_PA_REDUCE": lambda: (
+        os.getenv("ATOM_USE_TRITON_PA_REDUCE", "0") == "1"
+    ),
+    # Route the prefill MHA path through aiter's Triton flash_attn_varlen_func
+    # instead of the CK FmhaFwdKernel. Works on gpt-oss SWA layers now that the
+    # Triton wrapper accepts (window_size_right==0 + causal). Implemented by
+    # setting ENABLE_CK=0 in os.environ from atom/__init__.py BEFORE aiter is
+    # imported (aiter reads ENABLE_CK once at import time). Note: this is a
+    # GLOBAL aiter switch -- it routes every CK-vs-Triton dispatch (not just
+    # MHA) to Triton. Safe on gpt-oss-120b 1-GPU where CK is only ~0.07% of
+    # runtime; for other models, audit which other CK kernels would be
+    # affected before enabling.
+    "ATOM_USE_TRITON_MHA_PREFILL": lambda: (
+        os.getenv("ATOM_USE_TRITON_MHA_PREFILL", "0") == "1"
+    ),
+    # Route VocabParallelEmbedding.forward's TP=1 branch through aiter's Triton
+    # embedding.gather instead of F.embedding (which dispatches to
+    # aten::indexSelectSmallIndex). TP>1 already uses ATOM's local
+    # _masked_embedding_kernel and is unaffected. Drop-in; bit-exact.
+    "ATOM_USE_TRITON_EMBEDDING": lambda: (
+        os.getenv("ATOM_USE_TRITON_EMBEDDING", "0") == "1"
+    ),
     # Route the sampler's Exp(1) noise generation through aiter's Triton kernel
     # (aiter.ops.triton.rng.exponential) instead of
     # torch.empty(...).exponential_(1) which dispatches to aten's Philox RNG
@@ -104,13 +119,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # deterministic given a fixed torch.manual_seed.
     "ATOM_USE_TRITON_EXPONENTIAL": lambda: (
         os.getenv("ATOM_USE_TRITON_EXPONENTIAL", "0") == "1"
-    ),
-    # Route VocabParallelEmbedding.forward's TP=1 branch through aiter's Triton
-    # embedding.gather instead of F.embedding (which dispatches to
-    # aten::indexSelectSmallIndex). TP>1 already uses ATOM's local
-    # _masked_embedding_kernel and is unaffected. Drop-in; bit-exact.
-    "ATOM_USE_TRITON_EMBEDDING": lambda: (
-        os.getenv("ATOM_USE_TRITON_EMBEDDING", "0") == "1"
     ),
     # --- Kernel Fusion Toggles ---
     # fused_compress_attn: switch between Triton (default historical) and a

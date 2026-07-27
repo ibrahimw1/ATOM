@@ -42,6 +42,54 @@ def _has_module(module_name: str) -> bool:
     return importlib.util.find_spec(module_name) is not None
 
 
+@cache
+def _triton_gemm_a16w16():
+    """Resolve aiter's Triton a16w16 GEMM once, or None if unavailable.
+
+    Cached so the hot path pays one dict lookup instead of re-entering the
+    import machinery on every linear layer call.
+    """
+    try:
+        from aiter.ops.triton.gemm.basic.gemm_a16w16 import gemm_a16w16
+    except ImportError:
+        logger.warning(
+            "ATOM_USE_TRITON_BF16_DENSE=1 but aiter's Triton gemm_a16w16 is "
+            "unavailable; falling back to tuned_gemm."
+        )
+        return None
+    return gemm_a16w16
+
+
+def maybe_triton_bf16_gemm(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    otype: Optional[torch.dtype] = None,
+) -> Optional[torch.Tensor]:
+    """Compute ``x @ weight.T (+ bias)`` on aiter's Triton gemm_a16w16.
+
+    Returns None when the Triton path does not apply, so callers fall back to
+    ``tgemm.mm``. Gated on ATOM_USE_TRITON_BF16_DENSE. Shuffled weights are
+    refused because gemm_a16w16 expects a plain row-major [N, K] operand.
+    """
+    if not envs.ATOM_USE_TRITON_BF16_DENSE:
+        return None
+    if x.dtype not in (torch.bfloat16, torch.float16):
+        return None
+    if weight.dim() != 2 or getattr(weight, "is_shuffled", False):
+        return None
+    gemm = _triton_gemm_a16w16()
+    if gemm is None:
+        return None
+    out_dtype = otype if otype is not None else x.dtype
+    if x.dim() == 2:
+        return gemm(x, weight, bias=bias, dtype=out_dtype)
+    # gemm_a16w16 is 2-D only: collapse leading dims and restore them after.
+    flat = x.reshape(-1, x.shape[-1])
+    out = gemm(flat, weight, bias=bias, dtype=out_dtype)
+    return out.view(*x.shape[:-1], weight.shape[0])
+
+
 MXFP4_QUANT_BLOCK_SIZE = 32
 
 

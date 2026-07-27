@@ -11,7 +11,7 @@ from aiter.dist.parallel_state import get_tp_group
 from aiter.jit.utils.torch_guard import torch_compile_guard
 
 from atom.model_ops.lm_head_argmax import lm_head_argmax_pack
-from atom.model_ops.utils import atom_parameter
+from atom.model_ops.utils import atom_parameter, maybe_triton_bf16_gemm
 from atom.plugin import is_plugin_mode
 from atom.utils import envs
 from atom.utils.decorators import mark_trace
@@ -259,7 +259,12 @@ class ParallelLMHead(VocabParallelEmbedding):
             if context.is_prefill and not context.is_draft:
                 last_indices = attn_metadata.cu_seqlens_q[1:] - 1
                 x = x[last_indices].contiguous()
-        logits = tgemm.mm(x, self.weight, self.bias)
+        # The lm_head GEMM does not go through LinearBase, so it needs its own
+        # ATOM_USE_TRITON_BF16_DENSE hook; otherwise it stays the single largest
+        # aiter-hip kernel left in an all-Triton gpt-oss run.
+        logits = maybe_triton_bf16_gemm(x, self.weight, self.bias)
+        if logits is None:
+            logits = tgemm.mm(x, self.weight, self.bias)
         if self.tp_size > 1:
             use_custom = envs.ATOM_USE_CUSTOM_ALL_GATHER
             logits = tensor_model_parallel_all_gather(logits, use_custom=use_custom)
@@ -284,7 +289,9 @@ class ParallelLMHead(VocabParallelEmbedding):
         the lowest global index — ``torch.max`` picks the lowest local index, and
         ``argmax`` over ranks picks the lowest rank (== lowest vocab range).
         """
-        logits = tgemm.mm(x, self.weight, self.bias)  # [N, vocab/tp]
+        logits = maybe_triton_bf16_gemm(x, self.weight, self.bias)  # [N, vocab/tp]
+        if logits is None:
+            logits = tgemm.mm(x, self.weight, self.bias)
         if self.tp_size <= 1:
             return logits.argmax(dim=-1)
         # Pack (val, idx) as fp32 — idx < 2^24 is exact — and all-gather only the

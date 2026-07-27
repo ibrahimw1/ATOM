@@ -23,6 +23,30 @@ def _lever_enabled(name: str) -> bool:
 if _lever_enabled("ATOM_USE_TRITON_MHA_PREFILL"):
     _os.environ["ENABLE_CK"] = "0"
 
+# ATOM_USE_TRITON_BF16_DENSE also redirects aiter.tuned_gemm's autotuned "torch"
+# libtype at the dispatch table level. The autotuner picks libtype="torch" for
+# some small/odd shapes and that fallback runs F.linear -> aten::mm -> rocBLAS,
+# which would leave Tensile GEMMs in an otherwise all-Triton run. The in-process
+# hook in model_ops/utils.maybe_triton_bf16_gemm covers the ATOM call sites;
+# this covers callers that reach tuned_gemm directly.
+if _lever_enabled("ATOM_USE_TRITON_BF16_DENSE"):
+    try:
+        import aiter.tuned_gemm as _tg
+
+        if "torch" in _tg.solMap and "triton" in _tg.solMap:
+            _tg.solMap["torch"] = _tg.solMap["triton"]
+        else:
+            _triton_lever_logger.warning(
+                "ATOM_USE_TRITON_BF16_DENSE=1 but aiter.tuned_gemm.solMap lacks "
+                "'torch'/'triton' entries; tuned_gemm callers stay on rocBLAS."
+            )
+    except ImportError as exc:
+        _triton_lever_logger.warning(
+            "ATOM_USE_TRITON_BF16_DENSE=1 but aiter.tuned_gemm is unavailable "
+            "(%s); tuned_gemm callers stay on rocBLAS.",
+            exc,
+        )
+
 # ATOM_USE_TRITON_PA_REDUCE forces paged_attention_decode_v2's reduce step onto
 # the pure-Triton paged_attention_decode_ps_reduce_kernel. The wrapper picks
 # C++ HIP when CXX_PS_REDUCE_AVAILABLE, else FlyDSL, else the pure kernel; we
