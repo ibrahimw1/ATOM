@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 
+import logging
+from functools import cache
 from typing import Optional, Tuple
 
 import aiter
@@ -27,6 +29,8 @@ from atom.utils.decorators import mark_trace
 from atom.utils import envs
 from torch import Tensor, nn
 from torch.overrides import handle_torch_function, has_torch_function_unary
+
+logger = logging.getLogger("atom")
 
 
 def silu(input: Tensor, inplace: bool = False) -> Tensor:
@@ -63,15 +67,60 @@ def rmsnorm2d_fwd_(
     return rmsnorm2d_fwd(x, weight, eps).view(ori_shape)
 
 
-@torch_compile_guard()
+@cache
+def _triton_rmsnorm2d_fwd_with_add():
+    """Resolve aiter's Triton fused add+RMSNorm once, or None if unavailable."""
+    try:
+        from aiter.ops.triton.normalization.rmsnorm import rmsnorm2d_fwd_with_add as fn
+    except ImportError:
+        logger.warning(
+            "ATOM_USE_TRITON_RMSNORM=1 but aiter's Triton rmsnorm is unavailable; "
+            "falling back to the aiter HIP kernel."
+        )
+        return None
+    return fn
+
+
+def rmsnorm2d_fwd_with_add_fake_tensors(
+    x: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor, eps: float, dim: int
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty_like(x), torch.empty_like(x)
+
+
+# gen_fake makes this opaque to Dynamo. Without it torch.compile traces the body
+# with FakeTensors, and the Triton branch below dies on .data_ptr(); the HIP
+# branch only survived because its kernel is itself a registered custom op.
+@torch_compile_guard(gen_fake=rmsnorm2d_fwd_with_add_fake_tensors)
 def rmsnorm2d_fwd_with_add_(
     x: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor, eps: float, dim: int
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     ori_shape = x.shape
     x = x.reshape(-1, dim)
-    out = torch.empty_like(x)
-    residual_out = torch.empty_like(x)
-    rmsnorm2d_fwd_with_add(out, x, residual, residual_out, weight, eps)
+    triton_rmsnorm_add = (
+        _triton_rmsnorm2d_fwd_with_add() if envs.ATOM_USE_TRITON_RMSNORM else None
+    )
+    if triton_rmsnorm_add is not None:
+        # aiter's _fused_add_rmsnorm_kernel is passed a single row stride that it
+        # reuses for res_in and res_out, and it assumes a contiguous last dim.
+        # Coerce only when the layout actually violates that: an unconditional
+        # .contiguous() here costs a full extra copy per layer per step (~54 ms
+        # over a 256-step gpt-oss-120b decode), which cancels out the whole
+        # saving from moving off the aiter HIP kernel.
+        residual = residual.reshape(-1, dim)
+        if (
+            x.stride(1) != 1
+            or residual.stride(1) != 1
+            or residual.stride(0) != x.stride(0)
+        ):
+            x = x.contiguous()
+            residual = residual.contiguous()
+        out = torch.empty_like(x)
+        residual_out = torch.empty_like(x)
+        triton_rmsnorm_add(out, x, residual, residual_out, weight.contiguous(), eps)
+    else:
+        out = torch.empty_like(x)
+        residual_out = torch.empty_like(x)
+        rmsnorm2d_fwd_with_add(out, x, residual, residual_out, weight, eps)
     return out.view(ori_shape), residual_out.view(ori_shape)
 
 
