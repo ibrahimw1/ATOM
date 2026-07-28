@@ -81,6 +81,25 @@ def _triton_rmsnorm2d_fwd_with_add():
     return fn
 
 
+def _view_2d_rows(t: Tensor, dim: int) -> Optional[Tensor]:
+    """A ``(-1, dim)`` view of *t*, or None when that would need a copy.
+
+    aiter's Triton norm kernels index rows by a row stride and columns
+    contiguously, so any tensor whose last dim is ``dim`` with stride 1 is
+    usable as-is however its rows are laid out. ``reshape`` cannot express that
+    -- on a row-strided residual it silently materialises a contiguous copy --
+    so the view is attempted explicitly and refused rather than paid for.
+    """
+    if t.shape[-1] != dim or t.stride(-1) != 1:
+        return None
+    if t.dim() == 2:
+        return t
+    try:
+        return t.view(-1, dim)
+    except RuntimeError:
+        return None
+
+
 def rmsnorm2d_fwd_with_add_fake_tensors(
     x: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor, eps: float, dim: int
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -99,24 +118,16 @@ def rmsnorm2d_fwd_with_add_(
     triton_rmsnorm_add = (
         _triton_rmsnorm2d_fwd_with_add() if envs.ATOM_USE_TRITON_RMSNORM else None
     )
-    if triton_rmsnorm_add is not None:
-        # aiter's _fused_add_rmsnorm_kernel is passed a single row stride that it
-        # reuses for res_in and res_out, and it assumes a contiguous last dim.
-        # Coerce only when the layout actually violates that: an unconditional
-        # .contiguous() here costs a full extra copy per layer per step (~54 ms
-        # over a 256-step gpt-oss-120b decode), which cancels out the whole
-        # saving from moving off the aiter HIP kernel.
-        residual = residual.reshape(-1, dim)
-        if (
-            x.stride(1) != 1
-            or residual.stride(1) != 1
-            or residual.stride(0) != x.stride(0)
-        ):
-            x = x.contiguous()
-            residual = residual.contiguous()
-        out = torch.empty_like(x)
-        residual_out = torch.empty_like(x)
-        triton_rmsnorm_add(out, x, residual, residual_out, weight.contiguous(), eps)
+    residual_2d = (
+        _view_2d_rows(residual, dim) if triton_rmsnorm_add is not None else None
+    )
+    if triton_rmsnorm_add is not None and residual_2d is not None and x.stride(1) == 1:
+        # out/residual_out are allocated contiguous so their row strides are
+        # exact and the final view back to ori_shape is always valid; the
+        # kernel reads every row stride independently.
+        out = torch.empty(x.shape, dtype=x.dtype, device=x.device)
+        residual_out = torch.empty(x.shape, dtype=x.dtype, device=x.device)
+        triton_rmsnorm_add(out, x, residual_2d, residual_out, weight.contiguous(), eps)
     else:
         out = torch.empty_like(x)
         residual_out = torch.empty_like(x)
