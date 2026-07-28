@@ -58,12 +58,35 @@ def silu(input: Tensor, inplace: bool = False) -> Tensor:
     return torch._C._nn.silu(input)
 
 
-@torch_compile_guard()
+@cache
+def _triton_rms_norm():
+    """Resolve aiter's Triton (non-residual) RMSNorm once, or None."""
+    try:
+        from aiter.ops.triton.normalization.rmsnorm import rms_norm
+    except ImportError:
+        logger.warning(
+            "ATOM_USE_TRITON_RMSNORM=1 but aiter's Triton rms_norm is "
+            "unavailable; falling back to the aiter HIP kernel."
+        )
+        return None
+    return rms_norm
+
+
+def rmsnorm2d_fwd_fake_tensors(
+    x: torch.Tensor, weight: torch.Tensor, eps: float, dim: int
+) -> torch.Tensor:
+    return torch.empty_like(x)
+
+
+@torch_compile_guard(gen_fake=rmsnorm2d_fwd_fake_tensors)
 def rmsnorm2d_fwd_(
     x: torch.Tensor, weight: torch.Tensor, eps: float, dim: int
 ) -> torch.Tensor:
     ori_shape = x.shape
     x = x.reshape(-1, dim)
+    triton_rms_norm = _triton_rms_norm() if envs.ATOM_USE_TRITON_RMSNORM else None
+    if triton_rms_norm is not None and x.stride(1) == 1:
+        return triton_rms_norm(x, weight.contiguous(), eps).view(ori_shape)
     return rmsnorm2d_fwd(x, weight, eps).view(ori_shape)
 
 
