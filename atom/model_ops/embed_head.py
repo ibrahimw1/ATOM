@@ -135,6 +135,31 @@ def replicated_embedding(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     return _masked_embedding_launcher(x, weight, 0, weight.shape[0])
 
 
+def _triton_embedding_gather_fake(
+    x: torch.Tensor, weight: torch.Tensor
+) -> torch.Tensor:
+    return torch.empty(
+        x.numel(),
+        weight.shape[1],
+        dtype=weight.dtype,
+        device=weight.device,
+    )
+
+
+@torch_compile_guard(gen_fake=_triton_embedding_gather_fake)
+def triton_embedding_gather_(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    # Lazy import: keeps ATOM startable on aiter builds without the new
+    # triton/embedding module. The kernel is a pure load/store gather, bit-exact
+    # vs F.embedding.
+    #
+    # Kept opaque to torch.compile: aiter's gather reads x.shape[0] in Python to
+    # build its shape-assert message, so tracing into it specialises the dynamic
+    # batch dim to a constant and the next graph raises ConstraintViolationError.
+    from aiter.ops.triton.embedding.gather import gather
+
+    return gather(x, weight)
+
+
 class VocabParallelEmbedding(nn.Module):
 
     def __init__(
@@ -175,14 +200,7 @@ class VocabParallelEmbedding(nn.Module):
             y = get_tp_group().all_reduce(y, ca_fp8_quant=False)
         else:
             if envs.ATOM_USE_TRITON_EMBEDDING:
-                # Lazy import: keeps ATOM startable on aiter builds without the
-                # new triton/embedding module. Wrapper is a pure load/store
-                # Triton kernel that's bit-exact vs F.embedding.
-                from aiter.ops.triton.embedding.gather import (
-                    gather as _triton_embedding_gather,
-                )
-
-                y = _triton_embedding_gather(x, self.weight)
+                y = triton_embedding_gather_(x, self.weight)
             else:
                 y = F.embedding(x, self.weight)
         return y
