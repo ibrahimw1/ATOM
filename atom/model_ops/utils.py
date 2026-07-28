@@ -63,9 +63,9 @@ def _triton_gemm_a16w16():
 def maybe_triton_bf16_gemm(
     x: torch.Tensor,
     weight: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
-    otype: Optional[torch.dtype] = None,
-) -> Optional[torch.Tensor]:
+    bias: torch.Tensor | None = None,
+    otype: torch.dtype | None = None,
+) -> torch.Tensor | None:
     """Compute ``x @ weight.T (+ bias)`` on aiter's Triton gemm_a16w16.
 
     Returns None when the Triton path does not apply, so callers fall back to

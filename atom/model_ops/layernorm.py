@@ -25,8 +25,8 @@ from aiter.ops.triton.fused_add_rmsnorm_pad import fused_add_rmsnorm_pad
 from atom.config import QuantizationConfig
 from atom.model_ops.utils import atom_parameter
 from atom.quant_spec import LayerQuantConfig, should_skip_online_quant
-from atom.utils.decorators import mark_trace
 from atom.utils import envs
+from atom.utils.decorators import mark_trace
 from torch import Tensor, nn
 from torch.overrides import handle_torch_function, has_torch_function_unary
 
@@ -104,7 +104,7 @@ def _triton_rmsnorm2d_fwd_with_add():
     return fn
 
 
-def _view_2d_rows(t: Tensor, dim: int) -> Optional[Tensor]:
+def _view_2d_rows(t: Tensor, dim: int) -> Tensor | None:
     """A ``(-1, dim)`` view of *t*, or None when that would need a copy.
 
     aiter's Triton norm kernels index rows by a row stride and columns
@@ -125,7 +125,7 @@ def _view_2d_rows(t: Tensor, dim: int) -> Optional[Tensor]:
 
 def rmsnorm2d_fwd_with_add_fake_tensors(
     x: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor, eps: float, dim: int
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.empty_like(x), torch.empty_like(x)
 
 

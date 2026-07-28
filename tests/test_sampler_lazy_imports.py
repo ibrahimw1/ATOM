@@ -56,6 +56,9 @@ def test_sampler_imports_without_mix_sample():
         capture_output=True,
         text=True,
         timeout=120,
+        # Not check=True: the assertion below reports stdout/stderr, which a
+        # CalledProcessError traceback would not.
+        check=False,
     )
     assert proc.returncode == 0, (
         f"subprocess failed (returncode={proc.returncode})\n"
