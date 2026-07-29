@@ -77,8 +77,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "ATOM_USE_TRITON_RMSNORM": lambda: (
         os.getenv("ATOM_USE_TRITON_RMSNORM", "0") == "1"
     ),
-    # Route mixed_sample_outer_exponential through aiter's Triton drop-in
-    # (aiter/ops/triton/sample/mix_sample.py) instead of the aiter HIP kernel.
+    # Route mixed_sample_outer_exponential through ATOM's Triton kernel
+    # (atom/model_ops/triton_mixed_sample.py) instead of the aiter HIP kernel.
     # Bit-exact for greedy (temperature==0); same algorithm for stochastic.
     "ATOM_USE_TRITON_SAMPLE": lambda: (os.getenv("ATOM_USE_TRITON_SAMPLE", "0") == "1"),
     # Force aiter's paged_attention_decode_v2 reduce step onto the pure Triton
@@ -106,15 +106,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "ATOM_USE_TRITON_MHA_PREFILL": lambda: (
         os.getenv("ATOM_USE_TRITON_MHA_PREFILL", "0") == "1"
     ),
-    # Route VocabParallelEmbedding.forward's TP=1 branch through aiter's Triton
-    # embedding.gather instead of F.embedding (which dispatches to
-    # aten::indexSelectSmallIndex). TP>1 already uses ATOM's local
-    # _masked_embedding_kernel and is unaffected. Drop-in; bit-exact.
+    # Route VocabParallelEmbedding.forward's TP=1 branch through ATOM's Triton
+    # gather (atom.model_ops.triton_embedding_gather) instead of F.embedding
+    # (which dispatches to aten::indexSelectSmallIndex). TP>1 already uses ATOM's
+    # local _masked_embedding_kernel and is unaffected. Drop-in; bit-exact.
     "ATOM_USE_TRITON_EMBEDDING": lambda: (
         os.getenv("ATOM_USE_TRITON_EMBEDDING", "0") == "1"
     ),
-    # Route the sampler's Exp(1) noise generation through aiter's Triton kernel
-    # (aiter.ops.triton.rng.exponential) instead of
+    # Route the sampler's Exp(1) noise generation through ATOM's Triton kernel
+    # (atom.model_ops.triton_exponential) instead of
     # torch.empty(...).exponential_(1) which dispatches to aten's Philox RNG
     # (distribution_elementwise_grid_stride_kernel). NOT bit-exact vs aten
     # (different RNG family) but distribution-equivalent (mean=1, var=1) and

@@ -12,15 +12,14 @@ from torch import nn
 
 
 def mixed_sample_outer_exponential(*args, **kwargs):
-    """Dispatch to Triton drop-in when ATOM_USE_TRITON_SAMPLE=1, else HIP.
+    """Dispatch to ATOM's Triton kernel when ATOM_USE_TRITON_SAMPLE=1, else HIP.
 
-    The Triton import is lazy so ATOM stays startable on aiter builds that
-    don't ship aiter.ops.triton.sample.mix_sample (e.g. a clean clone of
-    ROCm/aiter:main, or any aiter branch other than the one that includes
-    the mix_sample drop-in).
+    The Triton drop-in used to be an aiter module that existed only in a fork of
+    aiter, which is why this dispatch had to tolerate its absence; ATOM owns the
+    kernel now, so upstream aiter is enough.
     """
     if envs.ATOM_USE_TRITON_SAMPLE:
-        from aiter.ops.triton.sample.mix_sample import (
+        from atom.model_ops.triton_mixed_sample import (
             mixed_sample_outer_exponential as _triton_mixed_sample_outer_exponential,
         )
 
@@ -51,7 +50,7 @@ SAMPLER_EPS = 1e-10
 
 
 def _exponential_noise(shape, dtype, device) -> torch.Tensor:
-    """Exp(1) noise allocator. Routes to aiter's Triton kernel when
+    """Exp(1) noise allocator. Routes to ATOM's Triton kernel when
     ATOM_USE_TRITON_EXPONENTIAL=1, else uses torch.empty().exponential_(1)
     (which dispatches to aten's Philox `distribution_elementwise_grid_stride_kernel`).
 
@@ -60,8 +59,7 @@ def _exponential_noise(shape, dtype, device) -> torch.Tensor:
     repeat-call reproducibility within the same process.
     """
     if envs.ATOM_USE_TRITON_EXPONENTIAL:
-        # Lazy import to keep ATOM startable on aiter builds without this module.
-        from aiter.ops.triton.rng.exponential import (
+        from atom.model_ops.triton_exponential import (
             exponential as _triton_exponential,
         )
 
