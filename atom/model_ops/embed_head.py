@@ -148,14 +148,14 @@ def _triton_embedding_gather_fake(
 
 @torch_compile_guard(gen_fake=_triton_embedding_gather_fake)
 def triton_embedding_gather_(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    # Lazy import: keeps ATOM startable on aiter builds without the new
-    # triton/embedding module. The kernel is a pure load/store gather, bit-exact
-    # vs F.embedding.
+    # ATOM's own gather. The aiter module this used to call exists only in a fork
+    # of aiter, so the lever could not be enabled against upstream.
     #
-    # Kept opaque to torch.compile: aiter's gather reads x.shape[0] in Python to
-    # build its shape-assert message, so tracing into it specialises the dynamic
-    # batch dim to a constant and the next graph raises ConstraintViolationError.
-    from aiter.ops.triton.embedding.gather import gather
+    # Kept opaque to torch.compile for the same reason as the lookups above: the
+    # launcher reads x.numel() in Python, so tracing into it would specialise the
+    # dynamic batch dim to a constant and the next graph would raise
+    # ConstraintViolationError.
+    from atom.model_ops.triton_embedding_gather import gather
 
     return gather(x, weight)
 
