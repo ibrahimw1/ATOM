@@ -92,22 +92,28 @@ def rmsnorm2d_fwd_(
 
 @cache
 def _triton_rmsnorm2d_fwd_with_add():
-    """Resolve aiter's Triton fused add+RMSNorm once, or None if unavailable."""
+    """Resolve ATOM's Triton fused add+RMSNorm once, or None if unavailable.
+
+    ATOM's own kernel rather than aiter's: aiter's indexes the residual with the
+    input's row stride, which forces a contiguous copy of a row-strided
+    residual. Keeping the kernel here means that costs nothing and needs no
+    aiter fork.
+    """
     try:
-        from aiter.ops.triton.normalization.rmsnorm import rmsnorm2d_fwd_with_add as fn
+        from atom.model_ops import triton_fused_add_rmsnorm as mod
     except ImportError:
         logger.warning(
-            "ATOM_USE_TRITON_RMSNORM=1 but aiter's Triton rmsnorm is unavailable; "
+            "ATOM_USE_TRITON_RMSNORM=1 but Triton is unavailable; "
             "falling back to the aiter HIP kernel."
         )
         return None
-    return fn
+    return mod
 
 
 def _view_2d_rows(t: Tensor, dim: int) -> Tensor | None:
     """A ``(-1, dim)`` view of *t*, or None when that would need a copy.
 
-    aiter's Triton norm kernels index rows by a row stride and columns
+    The Triton norm kernel indexes rows by a row stride and columns
     contiguously, so any tensor whose last dim is ``dim`` with stride 1 is
     usable as-is however its rows are laid out. ``reshape`` cannot express that
     -- on a row-strided residual it silently materialises a contiguous copy --
@@ -138,19 +144,21 @@ def rmsnorm2d_fwd_with_add_(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     ori_shape = x.shape
     x = x.reshape(-1, dim)
-    triton_rmsnorm_add = (
+    triton_norm = (
         _triton_rmsnorm2d_fwd_with_add() if envs.ATOM_USE_TRITON_RMSNORM else None
     )
-    residual_2d = (
-        _view_2d_rows(residual, dim) if triton_rmsnorm_add is not None else None
-    )
-    if triton_rmsnorm_add is not None and residual_2d is not None and x.stride(1) == 1:
+    if triton_norm is not None and not triton_norm.can_fuse(dim):
+        triton_norm = None
+    residual_2d = _view_2d_rows(residual, dim) if triton_norm is not None else None
+    if triton_norm is not None and residual_2d is not None and x.stride(1) == 1:
         # out/residual_out are allocated contiguous so their row strides are
         # exact and the final view back to ori_shape is always valid; the
         # kernel reads every row stride independently.
         out = torch.empty(x.shape, dtype=x.dtype, device=x.device)
         residual_out = torch.empty(x.shape, dtype=x.dtype, device=x.device)
-        triton_rmsnorm_add(out, x, residual_2d, residual_out, weight.contiguous(), eps)
+        triton_norm.fused_add_rmsnorm(
+            out, x, residual_2d, residual_out, weight.contiguous(), eps
+        )
     else:
         out = torch.empty_like(x)
         residual_out = torch.empty_like(x)
