@@ -93,8 +93,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("ATOM_USE_TRITON_PA_REDUCE", "0") == "1"
     ),
     # Route the prefill MHA path through aiter's Triton flash_attn_varlen_func
-    # instead of the CK FmhaFwdKernel. Works on gpt-oss SWA layers now that the
-    # Triton wrapper accepts (window_size_right==0 + causal). Implemented by
+    # instead of the CK FmhaFwdKernel. Reachable on gpt-oss SWA layers because
+    # the lever also swaps the sliding-window right edge from CK's 0 to the -1
+    # that aiter's Triton wrapper requires; under causal=True both describe the
+    # same mask (see attention_mha.py). Implemented by
     # setting ENABLE_CK=0 in os.environ from atom/__init__.py BEFORE aiter is
     # imported (aiter reads ENABLE_CK once at import time). Note: this is a
     # GLOBAL aiter switch -- it routes every CK-vs-Triton dispatch (not just

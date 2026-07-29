@@ -745,8 +745,18 @@ class PagedAttentionImpl(nn.Module):
                     q, k, v, k_cache, v_cache, k_scale, v_scale, attn_metadata
                 )
             )
+        # CK spells a causal sliding window as right edge 0, but aiter's Triton
+        # MHA wrapper rejects any right edge other than -1. The two are
+        # equivalent here: causal=True already masks everything to the right, and
+        # the Triton wrapper derives its window from the left edge alone and
+        # discards the right, so -1 reaches the kernel as the same
+        # SLIDING_WINDOW + IS_CAUSAL pair. Substituting only under the lever
+        # keeps the default CK dispatch byte-identical.
+        right_edge = -1 if envs.ATOM_USE_TRITON_MHA_PREFILL else 0
         sliding_window = (
-            (self.sliding_window, 0, 0) if self.sliding_window > 0 else (-1, -1, 0)
+            (self.sliding_window, right_edge, 0)
+            if self.sliding_window > 0
+            else (-1, -1, 0)
         )
         o = aiter.flash_attn_varlen_func(
             q,
